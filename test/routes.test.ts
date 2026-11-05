@@ -20,8 +20,8 @@ let n = 0;
 const vid = () => `visitor-${++n}-${Math.random().toString(16).slice(2, 8)}`;
 let ips = 0;
 /** Each call gets its own client IP unless one is passed: rate limits key on the IP now. */
-const post = async (path: string, body: Record<string, unknown>, xff: string = `10.0.0.${++ips}`) => {
-  const r = await handle(new Request('http://localhost/api/' + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': xff }, body: JSON.stringify(body) }));
+const post = async (path: string, body: Record<string, unknown>, xff: string = `10.0.0.${++ips}`, extra: Record<string, string> = {}) => {
+  const r = await handle(new Request('http://localhost/api/' + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': xff, ...extra }, body: JSON.stringify(body) }));
   return { status: r.status, body: (await r.json()) as any };
 };
 
@@ -306,6 +306,15 @@ describe('rate limits key on the client IP, not the body', () => {
     okReply();
     for (let i = 0; i < 15; i++) expect((await ask(`1.2.3.${i}, 6.6.6.6`)).status).toBe(200);
     expect((await ask('1.2.3.4,  6.6.6.6 ')).status).toBe(429);
+  });
+
+  it('prefers cf-connecting-ip over a spoofed x-forwarded-for', async () => {
+    setup();
+    okReply();
+    const cf = { 'cf-connecting-ip': '8.8.4.4' };
+    const askCf = (xff: string) => post('clerk', { question: 'a skill for making diagrams', visitorId: vid() }, xff, cf);
+    for (let i = 0; i < 15; i++) expect((await askCf(`3.3.3.${i}`)).status).toBe(200);
+    expect((await askCf('4.4.4.4')).status).toBe(429);
   });
 
   it('falls back to a shared "anon" bucket without the header', async () => {

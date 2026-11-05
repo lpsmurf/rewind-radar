@@ -40,8 +40,11 @@ function limited(id: string, max: number): boolean {
   return over;
 }
 
-/** The client IP: the last x-forwarded-for hop is the one our proxy appended; earlier hops are client-supplied. */
+/** The client IP: cf-connecting-ip (Cloudflare overwrites it), else the last x-forwarded-for hop; earlier hops are client-supplied. */
+// TODO: confirm which header is trustworthy on a deployed Supabase Edge request.
 function clientKey(req: Request): string {
+  const cf = req.headers.get('cf-connecting-ip')?.trim();
+  if (cf) return cf.slice(0, 64);
   const hops = (req.headers.get('x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
   return (hops[hops.length - 1] ?? 'anon').slice(0, 64);
 }
