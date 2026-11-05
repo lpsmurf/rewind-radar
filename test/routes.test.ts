@@ -1,20 +1,27 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { jsonReply, toolReply } from './helpers/anthropic.ts';
 import { LPSMURF, POSTIZ, stubGitHub } from './helpers/github.ts';
 import { GitHubError } from '../lib/github.ts';
 
-const { create, db } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any } }));
+const { create, db, gh } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, gh: { real: false } }));
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 // The username check is tested in github.test.ts / identity.test.ts; here "ghost*" never exist and "outage*" hits a GitHub outage.
-vi.mock('../lib/github.ts', async (orig) => ({
-  ...(await orig<typeof import('../lib/github.ts')>()),
-  githubUserExists: async (login: string) => {
-    if (login.startsWith('outage')) throw new (await import('../lib/github.ts')).GitHubError(503);
-    return !login.startsWith('ghost');
-  },
-}));
+vi.mock('../lib/github.ts', async (orig) => {
+  const real = await orig<typeof import('../lib/github.ts')>();
+  const fake = (login: string) => (login.startsWith('outage') ? undefined : !login.startsWith('ghost'));
+  return {
+    ...real,
+    // gh.real = true runs the real cache and fetch (see "the username check, end to end")
+    peekGithubUser: (login: string) => (gh.real ? real.peekGithubUser(login) : fake(login)),
+    githubUserExists: async (login: string) => {
+      if (gh.real) return real.githubUserExists(login);
+      if (login.startsWith('outage')) throw new real.GitHubError(503);
+      return !login.startsWith('ghost');
+    },
+  };
+});
 
 import { handle } from '../lib/routes.ts';
 import { CLERK_LINES } from '../lib/clerkGuard.ts';
@@ -49,6 +56,7 @@ function setup(o: { spent?: number; inStore?: { slug: string; kind: string; genr
 }
 
 beforeEach(() => {
+  gh.real = false;
   create.mockReset();
   create.mockResolvedValue(null); // vitest 3 flags a later mockRejectedValue as an unhandled error unless the mock had an implementation
 });
@@ -594,11 +602,13 @@ describe('the clerk is for GitHub visitors only', () => {
     expect(await askAs('lpsmurf')).toEqual({ status: 200, body: { answer: 'Rent it.', slugs: [], aisle: 'counter' } });
   });
 
-  it('lets a visitor through when GitHub is down (the IP limits still apply)', async () => {
-    setup();
-    create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Rent it.', slugs: [], aisle: 'counter' }));
+  it('fails closed with 503 when GitHub is down and the name is not cached', async () => {
+    const d = setup();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    expect((await askAs('outage-user')).status).toBe(200);
+    const r = await askAs('outage-user');
+    expect(r).toEqual({ status: 503, body: { error: CLERK_LINES.gateBusy } });
+    expect(create).not.toHaveBeenCalled();
+    expect(d.queries).toHaveLength(0);
   });
 
   it('lets a signed-in GitHub member through with just a token', async () => {
@@ -675,5 +685,67 @@ describe('the clerk is for GitHub visitors only', () => {
       for (let i = 0; i < 15; i++) expect((await askAs(`nat-user-${i}`, ip)).status).toBe(200);
       expect((await askAs('nat-user-last', ip)).status).toBe(429);
     });
+  });
+});
+
+describe('the username check, end to end (real cache, stubbed fetch)', () => {
+  const ASK = '???'; // junk is answered right after the gate, so the per-IP question limit never interferes
+  const ok = () => create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'ok', slugs: [], aisle: 'counter' }));
+  const askAs = (github: string, ip: string) => post('clerk', { question: ASK, visitorId: vid(), github }, ip);
+  beforeEach(() => {
+    gh.real = true;
+    setup();
+    ok();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  it('the 21st fresh username from one IP gets 429 with no GitHub call; the limit is GATE_LOOKUPS_PER_HOUR', async () => {
+    const seen = stubGitHub(Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`/users/fresh-${i}`, 200])));
+    for (let i = 0; i < 20; i++) expect((await askAs(`fresh-${i}`, '5.5.5.5')).status).toBe(200);
+    expect(seen).toHaveLength(20);
+    const r = await askAs('fresh-20', '5.5.5.5');
+    expect(r).toEqual({ status: 429, body: { error: CLERK_LINES.gateLookups } });
+    expect(seen).toHaveLength(20);
+    vi.stubEnv('GATE_LOOKUPS_PER_HOUR', '21');
+    expect((await askAs('fresh-21', '5.5.5.5')).status).toBe(200);
+  });
+
+  it('a cached username still works when its IP is over the lookup limit', async () => {
+    stubGitHub({ '/users/regular': 200, ...Object.fromEntries(Array.from({ length: 25 }, (_, i) => [`/users/lk-${i}`, 200])) });
+    expect((await askAs('regular', '5.5.6.6')).status).toBe(200);
+    for (let i = 0; i < 19; i++) await askAs(`lk-${i}`, '5.5.6.6');
+    expect((await askAs('lk-20', '5.5.6.6')).status).toBe(429);
+    expect((await askAs('regular', '5.5.6.6')).status).toBe(200);
+  });
+
+  it('an outage on an uncached name is 503; a cached hit passes through the same outage', async () => {
+    stubGitHub({ '/users/known': 200 });
+    expect((await askAs('known', '5.5.7.7')).status).toBe(200);
+    stubGitHub({ '/users/known': 503, '/users/newcomer': 503 });
+    expect((await askAs('newcomer', '5.5.7.8')).status).toBe(503);
+    expect((await askAs('known', '5.5.7.9')).status).toBe(200);
+  });
+
+  it('caches an unknown name, so repeating it costs no lookup', async () => {
+    const seen = stubGitHub({});
+    expect((await askAs('nobody-here', '5.5.8.8')).body.error).toBe(CLERK_LINES.gateUnknown);
+    expect((await askAs('nobody-here', '5.5.8.8')).body.error).toBe(CLERK_LINES.gateUnknown);
+    expect(seen).toHaveLength(1);
+  });
+});
+
+describe('a global ceiling on clerk Anthropic calls', () => {
+  it('falls back to search-only free mode once CLERK_MAX_PER_HOUR calls were made', async () => {
+    vi.stubEnv('CLERK_MAX_PER_HOUR', '3');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 3 * 3600_000); // earlier tests' calls fall out of the hourly window
+    afterEach(() => vi.useRealTimers());
+    setup();
+    create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'AI answer', slugs: [], aisle: 'counter' }));
+    const ask = () => post('clerk', { question: 'a skill for making diagrams', visitorId: vid() });
+    for (let i = 0; i < 3; i++) expect((await ask()).body.answer).toBe('AI answer');
+    const r = await ask();
+    expect(r.body).toEqual({ answer: CLERK_LINES.free, slugs: ['diagram-design'], aisle: 'Design' });
+    expect(create).toHaveBeenCalledTimes(3);
   });
 });

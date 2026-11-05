@@ -96,4 +96,19 @@ describe('githubUserExists', () => {
       vi.useRealTimers();
     }
   });
+
+  it('shares one GitHub call between concurrent checks of the same login', async () => {
+    const seen = stubGitHub({ '/users/lpsmurf': 200 });
+    const rs = await Promise.all([githubUserExists('lpsmurf'), githubUserExists('LPSmurf'), githubUserExists('lpsmurf')]);
+    expect(rs).toEqual([true, true, true]);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('forgets a failed in-flight check so the next one retries', async () => {
+    const seen = stubGitHub({ '/users/flaky': 500 });
+    await Promise.allSettled([githubUserExists('flaky'), githubUserExists('flaky')]);
+    expect(seen).toHaveLength(1);
+    await expect(githubUserExists('flaky')).rejects.toThrow();
+    expect(seen).toHaveLength(2);
+  });
 });

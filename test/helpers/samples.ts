@@ -46,5 +46,5 @@ export const githubMember = (login: string, id = `uid-${login}`) => ({
   id,
   app_metadata: { provider: 'github', providers: ['github'] },
   user_metadata: { user_name: login },
-  identities: [{ provider: 'github' }],
+  identities: [{ provider: 'github', identity_data: { user_name: login } }],
 });

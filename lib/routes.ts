@@ -55,6 +55,10 @@ function clientKey(req: Request): string {
  * Each visitor has an identity bucket and an IP bucket; both must have room. Members get a higher IP allowance
  * (60 questions, 10 assessments) so a shared NAT does not block them.
  */
+// Light identities are unverified (anyone can type any real username), so only the IP bucket really binds them;
+// CLERK_MAX_PER_HOUR is a per-isolate ceiling on every clerk Anthropic call, whoever asks.
+const clerkCeiling = (dry = false) => limited('ceiling:clerk', Number(env('CLERK_MAX_PER_HOUR') || '300'), dry);
+
 const CLERK_LIMITS = {
   light: { ask: 15, assess: 5, ipAsk: 15, ipAssess: 5 },
   member: { ask: 40, assess: 10, ipAsk: 60, ipAssess: 10 },
@@ -90,7 +94,8 @@ export async function handle(req: Request): Promise<Response> {
 
   // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
-    const id = await whoIs(req, body);
+    const id = await whoIs(req, body, { allowLookup: (dry) => !limited('lookup:' + who, Number(env('GATE_LOOKUPS_PER_HOUR') || '20'), dry) });
+    if (id.tier === 'busy') return json({ error: id.why === 'limit' ? CLERK_LINES.gateLookups : CLERK_LINES.gateBusy }, id.why === 'limit' ? 429 : 503);
     if (id.tier === 'guest') return json({ error: id.unknown ? CLERK_LINES.gateUnknown : CLERK_LINES.gate, gate: 'github' }, 401);
     const lim = CLERK_LIMITS[id.tier];
     const idKey = id.tier === 'member' ? `m:${id.userId}` : `gh:${id.github.toLowerCase()}`;
@@ -102,7 +107,7 @@ export async function handle(req: Request): Promise<Response> {
     if (q.kind === 'repo') {
       try {
         const got = await getAssessment(q.ref, {
-          allowMiss: (dry) => !(limited('assess:' + who, lim.ipAssess, dry) || limited(`assess:${idKey}`, lim.assess, dry)),
+          allowMiss: (dry) => !(clerkCeiling(dry) || limited('assess:' + who, lim.ipAssess, dry) || limited(`assess:${idKey}`, lim.assess, dry)),
         });
         if (got) {
           const { owner, repo } = q.ref;
@@ -146,7 +151,7 @@ export async function handle(req: Request): Promise<Response> {
     const text = q.kind === 'ask' ? q.text : String(body.question ?? '').trim();
     try {
       const rows = await candidates(text, 30);
-      if (!(await budgetLeft())) {
+      if (!(await budgetLeft()) || clerkCeiling()) {
         // free mode: no AI, just the best text matches
         const hits = rows.filter((r) => r.match).slice(0, 5);
         if (!hits.length) return json({ answer: CLERK_LINES.freeNone, ...plain });
