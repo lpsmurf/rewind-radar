@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 D=supabase/functions/_shared
 rm -rf "$D" && mkdir -p "$D/sources"
-cp lib/env.ts lib/admin.ts lib/ai.ts lib/github.ts lib/assess.ts lib/catalog.ts lib/chatGuard.ts lib/clerkGuard.ts lib/identity.ts lib/radar.ts lib/routes.ts "$D/"
+cp lib/env.ts lib/admin.ts lib/ai.ts lib/github.ts lib/assess.ts lib/catalog.ts lib/chatGuard.ts lib/clerkGuard.ts lib/identity.ts lib/radar.ts lib/stars.ts lib/monthly.ts lib/batchAssess.ts lib/routes.ts "$D/"
 # lib/sources/*: list every file here; a missing one fails the deno check
 cp lib/sources/types.ts lib/sources/verify.ts lib/sources/pipeline.ts lib/sources/index.ts lib/sources/stock.ts "$D/sources/"
 cp src/types.ts "$D/types.ts"
