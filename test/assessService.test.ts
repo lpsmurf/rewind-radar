@@ -172,6 +172,7 @@ describe('database-backed assess limits', () => {
     const q = d.calls('ai_usage').find((x: Query) => has(x, 'select') && !has(x, 'insert'))!;
     expect(arg(q, 'select')).toBe('id,at,cost_usd,repo');
     expect(has(q, 'eq', 'route', 'assess')).toBe(true);
+    expect(has(q, 'order', 'id', { ascending: false })).toBe(true); // newest rows first, in case PostgREST truncates at 1000
     const since = q.calls.find((c: any) => c[0] === 'gte')!;
     expect(since[1]).toBe('at');
     expect(String(since[2])).toBe(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');

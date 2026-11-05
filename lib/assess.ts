@@ -164,7 +164,14 @@ export async function reserve(
     dayStart.setUTCHours(0, 0, 0, 0);
     let rows: { id: unknown; at: string; cost_usd: number; repo: string | null }[];
     try {
-      const { data, error } = await admin().from('ai_usage').select('id,at,cost_usd,repo').eq('route', route).gte('at', dayStart.toISOString());
+      // PostgREST returns at most 1000 rows. The caps keep a day under that (assess 20/h <= 480/day, profile 30/h <= 720/day),
+      // and newest-first means the rows that matter for the hour and busy windows are always the ones counted.
+      const { data, error } = await admin()
+        .from('ai_usage')
+        .select('id,at,cost_usd,repo')
+        .eq('route', route)
+        .gte('at', dayStart.toISOString())
+        .order('id', { ascending: false });
       if (error) throw error;
       rows = (data ?? []) as typeof rows;
     } catch (e) {
