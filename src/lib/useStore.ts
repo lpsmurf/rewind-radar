@@ -5,7 +5,8 @@ import { GENRES } from '../types';
 import { MOCK_TAPES } from '../data/mock';
 import { sb } from './supabase';
 import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './clerkGate';
-import { clearGithub, getGithub, getVisitor, setGithub } from './visitor';
+import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
+import { createSendGate } from '../store/movement';
 
 const COLS =
   'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
@@ -24,6 +25,12 @@ function rentCommand(t: Tape): string {
 
 export function useStore() {
   const meRef = useRef<Visitor>(getVisitor());
+  // Presence/broadcast identity: one per tab. Votes and every API call keep meRef.current.id.
+  const keyRef = useRef<string>(presenceKey(meRef.current.id, getTabId()));
+  const posRef = useRef<{ x: number; y: number } | null>(null); // my last position, sent with presence
+  const remotePos = useRef(new Map<string, { x: number; y: number }>()); // latest move per presence key
+  const visitorsRef = useRef<Visitor[]>([]);
+  const gateRef = useRef(createSendGate());
   const [aisle, setAisleState] = useState<Aisle>('entrance');
   const [tapes, setTapes] = useState<Tape[]>(sb ? [] : MOCK_TAPES);
   const [visitors, setVisitors] = useState<Visitor[]>([]);
@@ -79,7 +86,7 @@ export function useStore() {
       if (!dead) setProposals((pr.data ?? []) as Proposal[]);
     })();
 
-    const ch = c.channel('store', { config: { presence: { key: meRef.current.id } } });
+    const ch = c.channel('store', { config: { presence: { key: keyRef.current } } });
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, (p: any) => {
       if (p.new?.visitor_id === meRef.current.id) return; // our own vote was already counted optimistically
       const id = p.new?.tape_id;
@@ -110,19 +117,32 @@ export function useStore() {
     };
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'proposals' }, upsertProposal);
     ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'proposals' }, upsertProposal);
+    ch.on('broadcast', { event: 'move' }, ({ payload }: any) => {
+      const { key, x, y } = payload ?? {};
+      if (typeof key !== 'string' || key === keyRef.current || !Number.isFinite(x) || !Number.isFinite(y)) return;
+      remotePos.current.set(key, { x, y });
+      // Mutated in place on purpose: the canvas reads these every frame, a re-render per move would be wasteful.
+      const v = visitorsRef.current.find((o) => o.id === key);
+      if (v) { v.x = x; v.y = y; }
+    });
     ch.on('presence', { event: 'sync' }, () => {
       const st = ch.presenceState() as Record<string, any[]>;
-      setVisitors(
-        Object.entries(st)
-          .filter(([k]) => k !== meRef.current.id)
-          .map(([k, v]) => ({ id: k, name: v[0]?.name, color: v[0]?.color, aisle: v[0]?.aisle ?? 'entrance' })),
-      );
+      const next = Object.entries(st)
+        .filter(([k]) => k !== keyRef.current)
+        .map(([k, v]) => {
+          const live = remotePos.current.get(k);
+          const x = live?.x ?? v[0]?.x, y = live?.y ?? v[0]?.y;
+          return { id: k, name: v[0]?.name, color: v[0]?.color, aisle: v[0]?.aisle ?? 'entrance', ...(Number.isFinite(x) && Number.isFinite(y) ? { x, y } : {}) } as Visitor;
+        });
+      for (const k of remotePos.current.keys()) if (!(k in st)) remotePos.current.delete(k);
+      visitorsRef.current = next;
+      setVisitors(next);
     });
     ch.subscribe((status: string) => {
       if (status === 'SUBSCRIBED') {
         setLive(true);
         const m = meRef.current;
-        ch.track({ name: m.name, color: m.color, aisle: 'entrance' });
+        ch.track({ name: m.name, color: m.color, aisle: 'entrance', ...posRef.current });
       }
     });
     chanRef.current = ch;
@@ -137,7 +157,15 @@ export function useStore() {
   const setAisle = useCallback((a: Aisle) => {
     setAisleState(a);
     const m = meRef.current;
-    chanRef.current?.track({ name: m.name, color: m.color, aisle: a });
+    chanRef.current?.track({ name: m.name, color: m.color, aisle: a, ...posRef.current });
+  }, []);
+
+  /** Broadcast my position (throttled to about 8/s). `force` is for the last step and for entering a room. */
+  const move = useCallback((x: number, y: number, force = false) => {
+    posRef.current = { x: Math.round(x), y: Math.round(y) };
+    const ch = chanRef.current;
+    if (!ch || !gateRef.current(performance.now(), force)) return;
+    ch.send({ type: 'broadcast', event: 'move', payload: { key: keyRef.current, ...posRef.current } });
   }, []);
 
   const bump = (id: string, k: 'votes' | 'rentals') =>
@@ -334,5 +362,5 @@ export function useStore() {
     [tapes],
   );
 
-  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, connectGithub, memberLogin: member?.login ?? null, member, canSignIn: canSignIn(import.meta.env.VITE_GITHUB_SIGNIN, !!sb), signIn, signOut, proposals, propose, backProposal, highlighted, toast, live };
+  return { tapes, top10, visitors, me, setAisle, move, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, connectGithub, memberLogin: member?.login ?? null, member, canSignIn: canSignIn(import.meta.env.VITE_GITHUB_SIGNIN, !!sb), signIn, signOut, proposals, propose, backProposal, highlighted, toast, live };
 }

@@ -16,7 +16,7 @@ export const GENRES = [
 export type Genre = (typeof GENRES)[number];
 
 /** Aisle ids: a genre name, or one of the special areas. */
-export type Aisle = Genre | 'new' | 'community' | 'counter' | 'entrance';
+export type Aisle = Genre | 'new' | 'community' | 'counter' | 'entrance' | 'arcade';
 
 export interface Tape {
   id: string;
@@ -43,6 +43,9 @@ export interface Visitor {
   name: string; // e.g. "GUEST-4F2A"
   color: string; // css color
   aisle: Aisle;
+  /** Last known position on the canvas (remote visitors only). Mutated in place by move broadcasts. */
+  x?: number;
+  y?: number;
 }
 
 /** Which aisle a tape lives in. */
