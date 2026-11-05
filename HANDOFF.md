@@ -72,10 +72,38 @@ A final Sonnet review of the diff led to six more fixes, also test-first: the `c
   4. Build the site with `VITE_GITHUB_SIGNIN=1`, then deploy the API and the site when you say so.
 - **Not tested in a real browser:** the OAuth redirect and the session being restored after it.
 
-### Phase 2 findings (already diagnosed, not started)
-- Other visitors don't move because presence shares only an aisle name (`setAisle` in `src/lib/useStore.ts`). Remote characters are drawn at fixed `anchorOf(aisle)` spots (`src/store/Store.tsx` ~L230).
-- Same-browser tabs share the `rr_visitor` id, so they merge into one presence entry and hide as "me".
-- The fix, plus chat and the arcade, is in docs/ROADMAP.md Phase 2.
+### Phase 2 status: code done on branch `feat/live-store`, PR stacked on the gate PR, not merged, not deployed
+- **Movement:**
+  - Click the floor or use arrow keys / WASD to walk. Paths go around the shelves (`src/store/movement.ts`).
+  - Positions travel as Realtime broadcast `move` events, at most about 8 a second. Remote characters walk smoothly toward them.
+  - Presence carries the last x/y, so newcomers see where everyone is.
+  - The presence key is the visitor id plus a per-tab id, so two tabs show as two people. Votes still use the plain visitor id.
+  - Incoming positions are clamped. `move` events for keys not in presence are ignored. Remote positions are capped at 200.
+- **Arcade:** an "ARCADE →" door leads to an OPENING SOON room with cabinets. "Tell me when it opens" backs or creates an "Open the arcade" proposal. No emulator, games or ROMs.
+- **Chat, gated like the clerk:**
+  - Guests can watch. Light visitors chat as `@login (unverified)`; members get a ✓. Switching to members-only is a one-line change in the `/chat` route, but chat would then be off until the GitHub OAuth App exists.
+  - Each message goes through free checks first (`lib/chatGuard.ts`: 140 chars; links only to github.com or the store; Unicode dots normalised; blocklist), then Haiku moderation.
+  - Moderation has its own budget, `AI_CHAT_BUDGET_USD` (default $0.50/day, `chat_spend_today()`). When that is spent, or the meter is broken, chat rests with a 503. It never posts unmoderated.
+  - Limits: 1 message every 2 s, 30 an hour per identity, 60 an hour per IP.
+  - Three distinct reporters remove a message, through an atomic `report_chat` RPC. Self-reports are refused.
+  - An admin can delete with the `x-admin-token` header.
+  - A removed message is a hard DELETE, so it vanishes for everyone through Realtime.
+  - Speech bubbles appear above the sender for about 6 s, with the login and tier mark. The chat log panel is in the sidebar.
+- **Migration `004_chat.sql`** (written, not applied): `chat_messages` (public SELECT on the last 24 h only), the server-only tables `chat_senders` and `chat_reports`, `report_chat` and `chat_spend_today` (service_role only), the Realtime publication, and an hourly pg_cron cleanup.
+  - Tested on a throwaway local Postgres 17 container: it applies, it re-runs idempotently, the report logic works, and anon is denied on writes, sender ids and the RPC.
+  - Not tested: the pg_cron and Realtime parts, since the container has neither.
+- **Tests:** 342. tsc, build, sync-edge and `deno check` pass.
+- **Known trade-off:** any `word.word` token counts as a link, so "node.js" or "next.js" in a message is refused.
+- **Luis, in this order (after Phase 1 and the gate are live):**
+  1. Apply `supabase/migrations/004_chat.sql`.
+  2. Set the secret: `npx supabase secrets set ADMIN_TOKEN=<long random> --project-ref onovfynfxuemvsrdetez`. Optionally set `AI_CHAT_BUDGET_USD`.
+  3. Run a two-browser test in your dev server:
+     - walking in one window shows in the other;
+     - two tabs are two people;
+     - entering the arcade shows for others;
+     - a chat message appears, with its bubble;
+     - a message reported by 3 identities disappears in both windows.
+  4. Deploy when you say so.
 
 ### How to work (Luis's rules)
 - Delegate to subagents on the cheapest model that fits: Haiku for mechanical work and QA, Sonnet for implementation and review.
