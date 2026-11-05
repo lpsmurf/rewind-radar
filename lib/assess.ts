@@ -172,7 +172,9 @@ export async function reserve(
       throw new BudgetError();
     }
     const others = rows.filter((r) => r.id !== id); // our own placeholder is counted by adding it, not by the query
-    if (o.busyRepo && others.some((r) => r.repo === o.busyRepo && now - Date.parse(r.at) < BUSY_MS)) throw new BusyError();
+    // Tie-break for simultaneous first requests: only the higher id defers, so the lowest id in the window proceeds.
+    // Rows with an unreadable id count as earlier (defer).
+    if (o.busyRepo && others.some((r) => r.repo === o.busyRepo && now - Date.parse(r.at) < BUSY_MS && !(Number(r.id) > Number(id)))) throw new BusyError();
     if (others.filter((r) => now - Date.parse(r.at) < 3600_000).length >= o.maxPerHour) throw new RateLimitError();
     if (others.reduce((sum, r) => sum + Number(r.cost_usd ?? 0), 0) + o.reserveUsd > o.budgetUsd) throw new BudgetError();
   } catch (e) {

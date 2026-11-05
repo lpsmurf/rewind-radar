@@ -621,4 +621,15 @@ describe('no repeat of a failed or in-flight assessment for 10 minutes', () => {
     setup(null, 0, [recent(0, 'gitroomhq/postiz-app', { id: 12 })]);
     await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BusyError);
   });
+
+  it('tie-break: a concurrent first request with a higher id defers to ours (the lowest id proceeds)', async () => {
+    stubGitHub(POSTIZ);
+    setup(null, 0, [recent(0, 'gitroomhq/postiz-app', { id: 1000 })]); // our placeholder is id 900
+    expect((await getAssessment(ref, allow))!.cached).toBe(false);
+  });
+
+  it('tie-break: a concurrent request with a lower id wins, ours throws BusyError', async () => {
+    setup(null, 0, [recent(0, 'gitroomhq/postiz-app', { id: 899 })]);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BusyError);
+  });
 });
