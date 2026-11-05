@@ -4,6 +4,7 @@ import type { Aisle, ClerkReply, Proposal, Tape, Visitor } from '../types';
 import { GENRES } from '../types';
 import { MOCK_TAPES } from '../data/mock';
 import { sb } from './supabase';
+import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './clerkGate';
 import { clearGithub, getGithub, getVisitor, setGithub } from './visitor';
 
 const COLS =
@@ -34,6 +35,9 @@ export function useStore() {
   const [github, setGithubState] = useState<string | null>(getGithub);
   const githubRef = useRef<string | null>(github);
   githubRef.current = github;
+  const [member, setMember] = useState<Member | null>(null);
+  const memberRef = useRef<Member | null>(null);
+  memberRef.current = member;
   const chanRef = useRef<ReturnType<NonNullable<typeof sb>['channel']> | null>(null);
   const toastTimer = useRef<number>();
 
@@ -44,6 +48,20 @@ export function useStore() {
   }, []);
 
   const me = useMemo<Visitor>(() => ({ ...meRef.current, aisle }), [aisle]);
+
+  // The Supabase session (GitHub sign-in): lets members use the clerk with higher limits.
+  useEffect(() => {
+    if (!sb) return;
+    let dead = false;
+    sb.auth.getSession().then(({ data }) => {
+      if (!dead) setMember(memberOf(data.session));
+    });
+    const { data } = sb.auth.onAuthStateChange((_e, session) => setMember(memberOf(session)));
+    return () => {
+      dead = true;
+      data.subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     if (!sb) return;
@@ -196,10 +214,18 @@ export function useStore() {
       try {
         const r = await fetch(`${API}/clerk`, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: clerkHeaders(memberRef.current),
           body: JSON.stringify({ question: q, visitorId: meRef.current.id, ...(githubRef.current ? { github: githubRef.current } : {}) }),
         });
         const j = await r.json().catch(() => ({}));
+        const gate = gateReply(r.status, j, !!githubRef.current);
+        if (gate) {
+          if (gate.forget) {
+            clearGithub();
+            setGithubState(null);
+          }
+          return onBreak(gate.line);
+        }
         if (!r.ok) return onBreak(j.error || undefined);
         const slugs: string[] = [...(j.slugs ?? []), ...(j.in_store ? [j.in_store] : [])];
         setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
@@ -277,6 +303,24 @@ export function useStore() {
     [say],
   );
 
+  const connectGithub = useCallback((u: string) => {
+    const login = u.trim().replace(/^@/, '');
+    if (!login) return;
+    setGithub(login);
+    setGithubState(login);
+  }, []);
+
+  const signIn = useCallback(async () => {
+    if (!sb) return;
+    const { error } = await sb.auth.signInWithOAuth({ provider: 'github', options: { redirectTo: location.origin + location.pathname } });
+    if (error) say('GitHub sign-in is not available right now');
+  }, [say]);
+
+  const signOut = useCallback(async () => {
+    await sb?.auth.signOut();
+    setMember(null);
+  }, []);
+
   const forgetGithub = useCallback(() => {
     clearGithub();
     setGithubState(null);
@@ -290,5 +334,5 @@ export function useStore() {
     [tapes],
   );
 
-  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, proposals, propose, backProposal, highlighted, toast, live };
+  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, connectGithub, memberLogin: member?.login ?? null, member, canSignIn: canSignIn(import.meta.env.VITE_GITHUB_SIGNIN, !!sb), signIn, signOut, proposals, propose, backProposal, highlighted, toast, live };
 }

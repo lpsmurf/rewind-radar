@@ -1,13 +1,16 @@
 import { Fragment, useState } from 'react';
 import type { Assessment, ClerkReply, RepoSummary, Tape } from '../types';
 import AssessmentCard from './AssessmentCard';
+import { gateState, type Member } from '../lib/clerkGate';
 
 interface Msg { who: 'you' | 'clerk'; text: string; reply?: ClerkReply }
 
-export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github, onForget, tapes, onShelve }: {
+export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github, onForget, tapes, onShelve, member, canSignIn, onConnect, onSignIn, onSignOut }: {
   onClose(): void; ask(q: string): Promise<ClerkReply>; scan(github: string): Promise<string>; chips: Tape[]; onOpen(t: Tape): void;
   github: string | null; onForget(): void; tapes: Tape[]; onShelve(r: RepoSummary, a: Assessment): void;
+  member: Member | null; canSignIn: boolean; onConnect(u: string): void; onSignIn(): void; onSignOut(): void;
 }) {
+  const gated = gateState(github, member) === 'gate';
   const [gh, setGh] = useState('');
   const [q, setQ] = useState('');
   const [log, setLog] = useState<Msg[]>([{ who: 'clerk', text: 'Welcome! What are you looking for today?' }]);
@@ -56,19 +59,36 @@ export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github,
           </div>
         )}
       </div>
-      <form onSubmit={goScan} className="row scan">
-        <input value={gh} maxLength={120} onChange={(e) => setGh(e.target.value)} placeholder="GitHub user or repo URL" aria-label="GitHub user or repo" />
-        <button className="btn" disabled={busy}>SCAN MY GITHUB</button>
-      </form>
-      {github ? (
-        <p className="small ghnote">connected as @{github} · <button type="button" className="linkbtn" onClick={onForget}>forget</button></p>
+      {gated ? (
+        <div className="gate">
+          <p className="small">The clerk only serves GitHub folks. Pick one:</p>
+          <form onSubmit={(e) => { e.preventDefault(); onConnect(gh); }} className="row">
+            <input value={gh} maxLength={39} onChange={(e) => setGh(e.target.value)} placeholder="Your GitHub username" aria-label="Your GitHub username" />
+            <button className="btn" disabled={busy}>LET ME IN</button>
+          </form>
+          <form onSubmit={goScan} className="row scan">
+            <input value={gh} maxLength={120} onChange={(e) => setGh(e.target.value)} placeholder="GitHub user or repo URL" aria-label="GitHub user or repo" />
+            <button className="btn" disabled={busy}>SCAN MY GITHUB</button>
+          </form>
+          {canSignIn && <button type="button" className="btn" onClick={onSignIn}>SIGN IN WITH GITHUB</button>}
+        </div>
       ) : (
-        <p className="small ghnote">Scan your GitHub to get a FIT check on repos.</p>
+        <>
+          <form onSubmit={goScan} className="row scan">
+            <input value={gh} maxLength={120} onChange={(e) => setGh(e.target.value)} placeholder="GitHub user or repo URL" aria-label="GitHub user or repo" />
+            <button className="btn" disabled={busy}>SCAN MY GITHUB</button>
+          </form>
+          {member ? (
+            <p className="small ghnote">signed in as @{member.login} · <button type="button" className="linkbtn" onClick={onSignOut}>sign out</button></p>
+          ) : (
+            <p className="small ghnote">connected as @{github} · <button type="button" className="linkbtn" onClick={onForget}>forget</button></p>
+          )}
+          <form onSubmit={go} className="row">
+            <input value={q} maxLength={300} onChange={(e) => setQ(e.target.value)} placeholder="Ask for a tape or paste a GitHub repo..." />
+            <button className="btn" disabled={busy}>ASK</button>
+          </form>
+        </>
       )}
-      <form onSubmit={go} className="row">
-        <input value={q} maxLength={300} onChange={(e) => setQ(e.target.value)} placeholder="Ask for a tape or paste a GitHub repo..." />
-        <button className="btn" disabled={busy}>ASK</button>
-      </form>
     </aside>
   );
 }

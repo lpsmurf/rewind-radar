@@ -85,7 +85,7 @@ export default function App() {
         </aside>
       </main>
       {cur && <TapePanel tape={cur} onClose={() => setOpen(null)} onRent={() => s.rent(cur)} onVote={() => s.vote(cur)} />}
-      {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} github={s.github} onForget={s.forgetGithub} tapes={s.tapes} onShelve={onShelve} />}
+      {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} github={s.github} onForget={s.forgetGithub} tapes={s.tapes} onShelve={onShelve} member={s.member} canSignIn={s.canSignIn} onConnect={s.connectGithub} onSignIn={s.signIn} onSignOut={s.signOut} />}
       {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} initial={submitInitial} />}
       {proposeOpen && <ProposeModal onClose={() => setProposeOpen(false)} propose={s.propose} />}
       {qrOpen && <BigQR inStore={s.visitors.length + 1} onClose={() => setQrOpen(false)} />}
