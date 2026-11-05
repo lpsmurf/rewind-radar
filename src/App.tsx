@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import Store from './store/Store';
 import { useStore } from './lib/useStore';
 import { RING_COLORS, type Tape } from './types';
@@ -7,6 +7,7 @@ import ClerkDrawer from './ui/ClerkDrawer';
 import SubmitModal from './ui/SubmitModal';
 import ProposalsBoard from './ui/ProposalsBoard';
 import ProposeModal from './ui/ProposeModal';
+import { BigQR, JoinCard } from './ui/JoinQR';
 
 export default function App() {
   const s = useStore();
@@ -14,6 +15,18 @@ export default function App() {
   const [clerkOpen, setClerkOpen] = useState(false);
   const [submitOpen, setSubmitOpen] = useState(false);
   const [proposeOpen, setProposeOpen] = useState(false);
+  const [qrOpen, setQrOpen] = useState(false);
+
+  // Presenter shortcut: press Q to toggle the big QR (ignored while typing).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      if (el.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === 'q' || e.key === 'Q') setQrOpen((v) => !v);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   const cur = open ? s.tapes.find((t) => t.id === open.id) ?? open : null;
   const chips = s.tapes.filter((t) => s.highlighted.has(t.id));
 
@@ -29,6 +42,7 @@ export default function App() {
           <button className="btn" onClick={() => setClerkOpen(true)}>ASK THE CLERK</button>
           <button className="btn alt" onClick={() => setSubmitOpen(true)}>SUBMIT YOUR PROJECT</button>
           <button className="btn" onClick={() => setProposeOpen(true)}>PROPOSE AN IDEA</button>
+          <button className="btn alt" onClick={() => setQrOpen(true)}>SHOW QR</button>
         </div>
       </header>
       <main>
@@ -45,6 +59,7 @@ export default function App() {
           />
         </section>
         <aside className="side">
+          <JoinCard onShowBig={() => setQrOpen(true)} />
           <div className="panel">
             <h3>TOP 10 THIS WEEK</h3>
             <ol className="top">
@@ -66,6 +81,7 @@ export default function App() {
       {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} />}
       {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} />}
       {proposeOpen && <ProposeModal onClose={() => setProposeOpen(false)} propose={s.propose} />}
+      {qrOpen && <BigQR inStore={s.visitors.length + 1} onClose={() => setQrOpen(false)} />}
       {s.toast && <div className="toast">{s.toast}</div>}
     </div>
   );
