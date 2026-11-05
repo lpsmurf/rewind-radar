@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { API, API_ABS } from './api';
 import type { Aisle, Tape, Visitor } from '../types';
 import { GENRES } from '../types';
 import { MOCK_TAPES } from '../data/mock';
@@ -10,7 +11,7 @@ const COLS =
 
 function rentCommand(t: Tape): string {
   if (t.kind === 'skill' || t.kind === 'memory') {
-    return `mkdir -p ~/.claude/skills/${t.slug} && curl -fsSL ${location.origin}/api/tape/${t.slug} -o ~/.claude/skills/${t.slug}/SKILL.md`;
+    return `mkdir -p ~/.claude/skills/${t.slug} && curl -fsSL ${API_ABS}/tape/${t.slug} -o ~/.claude/skills/${t.slug}/SKILL.md`;
   }
   return `git clone ${t.source_url ?? ''}`;
 }
@@ -135,7 +136,7 @@ export function useStore() {
   const submit = useCallback(
     async (f: { title: string; url: string; note: string; submitter: string }): Promise<boolean> => {
       try {
-        const r = await fetch('/api/submit', {
+        const r = await fetch(`${API}/submit`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ ...f, visitorId: meRef.current.id }),
@@ -162,7 +163,7 @@ export function useStore() {
   const askClerk = useCallback(
     async (q: string): Promise<string> => {
       try {
-        const r = await fetch('/api/clerk', {
+        const r = await fetch(`${API}/clerk`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ question: q, visitorId: meRef.current.id }),

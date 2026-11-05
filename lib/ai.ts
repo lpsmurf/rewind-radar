@@ -1,12 +1,13 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { GENRES, type Genre, type Ring, type Trust } from '../src/types';
+import { GENRES, type Genre, type Ring, type Trust } from '../src/types.ts';
+import { env } from './env.ts';
 
 export const HAIKU = 'claude-haiku-5-5';
 export const SONNET = 'claude-sonnet-5-5';
 
 let client: Anthropic | null = null;
 function ai(): Anthropic {
-  if (!client) client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  if (!client) client = new Anthropic({ apiKey: env('ANTHROPIC_API_KEY') });
   return client;
 }
 

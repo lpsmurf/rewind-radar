@@ -1,4 +1,5 @@
-import type { RepoInput } from './ai';
+import type { RepoInput } from './ai.ts';
+import { env } from './env.ts';
 
 export type RepoInfo = RepoInput & { html_url: string };
 
@@ -10,7 +11,8 @@ function headers(raw = false): Record<string, string> {
     accept: raw ? 'application/vnd.github.raw' : 'application/vnd.github+json',
     'user-agent': 'rewind-radar-video',
   };
-  if (process.env.GITHUB_TOKEN) h.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  const tok = env('GITHUB_TOKEN');
+  if (tok) h.authorization = `Bearer ${tok}`;
   return h;
 }
 

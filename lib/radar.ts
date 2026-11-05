@@ -1,6 +1,6 @@
-import { admin } from './admin';
-import { reviewRepo } from './ai';
-import { searchWeekly } from './github';
+import { admin } from './admin.ts';
+import { reviewRepo } from './ai.ts';
+import { searchWeekly } from './github.ts';
 
 async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = [];

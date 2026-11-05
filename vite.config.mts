@@ -1,31 +1,31 @@
 import { defineConfig, loadEnv, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
+import ws from 'ws';
 
-// Serves /api/*.ts (Vercel-style handlers) during `vite` dev so we can test locally.
+// Node < 22 has no global WebSocket; supabase-js needs one.
+if (!(globalThis as any).WebSocket) (globalThis as any).WebSocket = ws;
+
+// Serve /api/* locally with the same Web-standard router the Supabase Edge Function uses.
 function apiDev(): Plugin {
   return {
     name: 'api-dev',
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
         if (!req.url?.startsWith('/api/')) return next();
-        const url = new URL(req.url, 'http://localhost');
-        const parts = url.pathname.replace(/^\/api\//, '').split('/').filter(Boolean);
-        const query: Record<string, string> = Object.fromEntries(url.searchParams);
-        let file = `/api/${parts.join('/')}.ts`;
-        if (parts[0] === 'tape' && parts[1]) { file = '/api/tape/[slug].ts'; query.slug = decodeURIComponent(parts[1]); }
         let raw = '';
         for await (const chunk of req) raw += chunk;
-        let body: unknown = undefined;
-        try { body = raw ? JSON.parse(raw) : undefined; } catch { body = raw; }
-        const vreq: any = Object.assign(req, { query, body });
-        const vres: any = Object.assign(res, {
-          status(code: number) { res.statusCode = code; return vres; },
-          json(obj: unknown) { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(obj)); return vres; },
-          send(s: string) { res.end(s); return vres; },
+        const headers = Object.entries(req.headers).filter((e): e is [string, string] => typeof e[1] === 'string');
+        const request = new Request(new URL(req.url, 'http://localhost'), {
+          method: req.method,
+          headers,
+          body: req.method === 'GET' || req.method === 'HEAD' ? undefined : raw,
         });
         try {
-          const mod = await server.ssrLoadModule(file);
-          await mod.default(vreq, vres);
+          const { handle } = await server.ssrLoadModule('/lib/routes.ts');
+          const r: Response = await handle(request);
+          res.statusCode = r.status;
+          r.headers.forEach((v, k) => res.setHeader(k, v));
+          res.end(Buffer.from(await r.arrayBuffer()));
         } catch (e) {
           console.error('[api-dev]', e);
           if (!res.headersSent) { res.statusCode = 500; res.end(String(e)); }
@@ -35,7 +35,10 @@ function apiDev(): Plugin {
   };
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
   Object.assign(process.env, loadEnv(mode, process.cwd(), ''));
-  return { plugins: [react(), apiDev()] };
+  return {
+    base: command === 'build' ? '/rewind-radar/' : '/', // GitHub Pages project site
+    plugins: [react(), apiDev()],
+  };
 });

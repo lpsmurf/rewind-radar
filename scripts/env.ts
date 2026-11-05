@@ -1,6 +1,9 @@
 // Minimal .env.local loader for local scripts (values are never printed).
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
+import ws from 'ws';
+// Node < 22 has no global WebSocket; supabase-js needs one.
+if (!(globalThis as any).WebSocket) (globalThis as any).WebSocket = ws;
 try {
   for (const line of readFileSync('.env.local', 'utf8').split('\n')) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/);
