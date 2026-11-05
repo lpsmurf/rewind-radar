@@ -62,3 +62,31 @@ export async function searchWeekly(n = 20): Promise<RepoInfo[]> {
     })),
   );
 }
+
+/** Read a public GitHub user (or a single repo) so the clerk can recommend tapes for it. */
+export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'repo'; name: string; text: string } | null> {
+  const s = input.trim().replace(/^@/, '').replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, '');
+  if (!/^[\w.-]+(\/[\w.-]+)?$/.test(s)) return null;
+  if (s.includes('/')) {
+    const r = await fetchRepo(`https://github.com/${s}`);
+    if (!r) return null;
+    return {
+      kind: 'repo',
+      name: r.full_name,
+      text: `REPO ${r.full_name} (${r.language ?? 'unknown'}, ${r.stars}★)\n${r.description ?? ''}\n\nREADME:\n${r.readme.slice(0, 3500)}`,
+    };
+  }
+  const u = await fetch(`https://api.github.com/users/${s}`, { headers: headers() });
+  if (!u.ok) return null;
+  const user: any = await u.json();
+  const rr = await fetch(`https://api.github.com/users/${s}/repos?sort=pushed&per_page=30&type=owner`, { headers: headers() });
+  const repos: any[] = rr.ok ? ((await rr.json()) as any[]).filter((x) => !x.fork).slice(0, 20) : [];
+  const lines = repos.map(
+    (x) => `- ${x.name} [${x.language ?? '?'}] ${x.stargazers_count}★ ${(x.topics ?? []).join(',')} — ${x.description ?? ''}`,
+  );
+  return {
+    kind: 'user',
+    name: user.login,
+    text: `USER ${user.login}${user.name ? ` (${user.name})` : ''}\nbio: ${user.bio ?? ''}\npublic repos: ${user.public_repos}\n\nRecently active repos:\n${lines.join('\n')}`,
+  };
+}

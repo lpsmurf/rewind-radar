@@ -58,7 +58,7 @@ export default function App() {
         </aside>
       </main>
       {cur && <TapePanel tape={cur} onClose={() => setOpen(null)} onRent={() => s.rent(cur)} onVote={() => s.vote(cur)} />}
-      {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} chips={chips} onOpen={(t) => setOpen(t)} />}
+      {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} />}
       {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} />}
       {s.toast && <div className="toast">{s.toast}</div>}
     </div>

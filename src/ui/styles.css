@@ -46,3 +46,7 @@ fieldset{border:0;padding:0;margin:0}
 .err{color:#ff4d4d;font-size:9px}
 .toast{position:fixed;left:50%;bottom:20px;transform:translateX(-50%);background:#ffd200;color:#0a0a14;border:4px solid #0a0a14;padding:10px 14px;z-index:30;font-size:10px;max-width:92vw}
 @media(max-width:900px){main{grid-template-columns:minmax(0,1fr)}h1{font-size:14px}}
+
+.msg { white-space: pre-line; }
+.row.scan { margin-bottom: 8px; }
+.row.scan .btn { white-space: nowrap; font-size: 9px; }

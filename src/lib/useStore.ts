@@ -182,6 +182,30 @@ export function useStore() {
     [setAisle],
   );
 
+  const scanProfile = useCallback(
+    async (github: string): Promise<string> => {
+      try {
+        const r = await fetch(`${API}/profile`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ github, visitorId: meRef.current.id }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) return j.error || 'The clerk is on break.';
+        const picks: { slug: string; why: string }[] = j.picks ?? [];
+        const slugs = picks.map((p) => p.slug);
+        setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
+        const valid = ['new', 'community', 'counter', 'entrance', ...GENRES];
+        if (valid.includes(j.aisle)) setAisle(j.aisle as Aisle);
+        const title = (slug: string) => tapesRef.current.find((t) => t.slug === slug)?.title ?? slug;
+        return [`RADAR FOR ${String(j.name ?? github).toUpperCase()}: ${j.answer ?? ''}`, ...picks.map((p) => `★ ${title(p.slug)} — ${p.why}`)].join('\n');
+      } catch {
+        return 'The clerk is on break.';
+      }
+    },
+    [setAisle],
+  );
+
   const tapesRef = useRef<Tape[]>(tapes);
   tapesRef.current = tapes;
 
@@ -190,5 +214,5 @@ export function useStore() {
     [tapes],
   );
 
-  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, highlighted, toast, live };
+  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, highlighted, toast, live };
 }

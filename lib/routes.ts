@@ -1,6 +1,6 @@
 import { admin } from './admin.ts';
-import { clerk, reviewSubmission } from './ai.ts';
-import { fetchRepo } from './github.ts';
+import { clerk, recommendForProfile, reviewSubmission } from './ai.ts';
+import { fetchProfile, fetchRepo } from './github.ts';
 import { refreshRadar } from './radar.ts';
 import { env } from './env.ts';
 
@@ -43,6 +43,24 @@ export async function handle(req: Request): Promise<Response> {
       return json(await clerk(question, data ?? []));
     } catch (e) {
       console.error('[clerk]', e);
+      return json({ error: 'The clerk is on break.' }, 500);
+    }
+  }
+
+  // --- profile radar: recommend tapes for a GitHub user/repo ---
+  if (path === 'profile' && req.method === 'POST') {
+    const github = String(body.github ?? '').trim();
+    if (github.length < 1 || github.length > 120) return json({ error: 'Enter a GitHub username or repo URL' }, 400);
+    if (limited('profile:' + who, 6)) return json({ error: 'Max 6 scans per hour' }, 429);
+    try {
+      const prof = await fetchProfile(github);
+      if (!prof) return json({ error: "Couldn't find that GitHub user or repo" }, 404);
+      const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').limit(400);
+      if (error) return json({ error: 'Catalog unavailable' }, 500);
+      const rec = await recommendForProfile(prof.text, data ?? []);
+      return json({ ...rec, name: prof.name, kind: prof.kind, slugs: rec.picks.map((p) => p.slug) });
+    } catch (e) {
+      console.error('[profile]', e);
       return json({ error: 'The clerk is on break.' }, 500);
     }
   }
