@@ -8,6 +8,7 @@ import SubmitModal from './ui/SubmitModal';
 import ProposalsBoard from './ui/ProposalsBoard';
 import ProposeModal from './ui/ProposeModal';
 import ArcadePanel from './ui/ArcadePanel';
+import ChatPanel from './ui/ChatPanel';
 import { BigQR, JoinCard } from './ui/JoinQR';
 
 export default function App() {
@@ -60,6 +61,8 @@ export default function App() {
             tapes={s.tapes}
             visitors={s.visitors}
             me={s.me}
+            chat={s.chat}
+            meKey={s.meKey}
             highlighted={s.highlighted}
             top10={s.top10}
             onTapeClick={setOpen}
@@ -79,6 +82,7 @@ export default function App() {
               ))}
             </ol>
           </div>
+          <ChatPanel chat={s.chat} meKey={s.meKey} github={s.github} member={s.member} onSend={s.sendChat} onReport={s.reportChat} onConnect={() => setClerkOpen(true)} />
           <ProposalsBoard proposals={s.proposals} onBack={s.backProposal} onPropose={() => setProposeOpen(true)} />
           <div className="panel">
             <h3>RINGS</h3>

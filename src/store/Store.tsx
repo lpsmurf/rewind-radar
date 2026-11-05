@@ -6,11 +6,15 @@ import {
   bx, by, clampToFloor, findPath, inRect, keyVector, lerpRemote, stepBy, stepToward,
   type Point, type Room,
 } from './movement';
+import { activeBubble, wrapBubble, type ChatEntry } from './chat';
 
 export interface StoreProps {
   tapes: Tape[];
   visitors: Visitor[]; // other visitors (not me)
   me: Visitor;
+  /** Recent chat and my own presence key: a sender's latest line shows as a bubble for a few seconds. */
+  chat: ChatEntry[];
+  meKey: string;
   highlighted: Set<string>;
   top10: Tape[];
   onTapeClick(t: Tape): void;
@@ -388,6 +392,26 @@ export default function Store(props: StoreProps) {
           g.fillRect(px + 2, ay, 4, 3); g.fillRect(px + 3, ay + 3, 2, 2);
           g.fillStyle = P.ink; g.fillRect(px + 3, ay + 5, 2, 1);
         }
+      }
+
+      // speech bubbles on top of everyone: matched by presence key (my own key for my own character)
+      const wall = Date.now();
+      for (const a of avs) {
+        const b = activeBubble(p.chat, a.me ? p.meKey : a.v.id, wall);
+        if (!b) continue;
+        const lines = wrapBubble(b.body, 18, 4);
+        g.font = FONT_S;
+        const bw = Math.max(...lines.map((l) => l.length)) * 6 + 6, bh = lines.length * 8 + 4;
+        const feet = Math.round(a.y) - 12 - (a.me ? 18 : 10); // above the name tag (and my arrow)
+        const bxp = Math.min(Math.max(2, Math.round(a.x - bw / 2)), W - bw - 2);
+        const byp = Math.max(2, feet - bh - 4);
+        g.fillStyle = P.ink; g.fillRect(bxp - 1, byp - 1, bw + 2, bh + 2);
+        g.fillStyle = P.cream; g.fillRect(bxp, byp, bw, bh);
+        const tx = Math.min(Math.max(bxp + 3, Math.round(a.x) - 2), bxp + bw - 7); // pixel tail pointing at the sender
+        g.fillStyle = P.ink; g.fillRect(tx - 1, byp + bh, 6, 2); g.fillRect(tx, byp + bh + 2, 4, 2); g.fillRect(tx + 1, byp + bh + 4, 2, 1);
+        g.fillStyle = P.cream; g.fillRect(tx, byp + bh, 4, 2); g.fillRect(tx + 1, byp + bh + 2, 2, 2);
+        g.fillStyle = P.ink;
+        lines.forEach((l, i) => g.fillText(l, bxp + 3, byp + 3 + i * 8));
       }
 
       // hover + tooltip

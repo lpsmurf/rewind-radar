@@ -111,3 +111,11 @@ textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; r
 .acard .warn { color: #ff4d4d; }
 .acard .foot { opacity: 0.7; }
 .acard .btn.full { margin: 6px 0 0; font-size: 8px; white-space: normal; }
+
+/* Store chat (sidebar) */
+.chatlog { max-height: 150px; overflow: auto; margin-bottom: 8px; border: 2px dashed #1f4fbf; padding: 4px 6px; }
+.cmsg { margin: 4px 0; font-size: 8px; line-height: 1.6; overflow-wrap: anywhere; }
+.cmsg b { color: #ffd200; }
+.cmsg.mine b { color: #3ddc84; }
+.cmsg .rep { margin-left: 6px; color: #ff4d4d; text-decoration: none; }
+.chat .cerr { color: #ff4d4d; margin: 6px 0 0; }

@@ -7,7 +7,9 @@ import { sb } from './supabase';
 import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './clerkGate';
 import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
 import { createSendGate } from '../store/movement';
+import { mergeChat, removeChat, type ChatEntry, type ChatMsg } from '../store/chat';
 
+const CHAT_COLS = 'id,at,sender_key,login,tier,body';
 const COLS =
   'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
 
@@ -35,6 +37,7 @@ export function useStore() {
   const [tapes, setTapes] = useState<Tape[]>(sb ? [] : MOCK_TAPES);
   const [visitors, setVisitors] = useState<Visitor[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [chat, setChat] = useState<ChatEntry[]>([]);
   const backedRef = useRef<Set<string>>(new Set());
   const [highlighted, setHighlighted] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
@@ -84,6 +87,9 @@ export function useStore() {
       setTapes(((tr.data ?? []) as any[]).map((t) => ({ ...t, votes: vm.get(t.id) ?? 0 }) as Tape));
       const pr = await c.from('proposals').select('id,kind,title,pitch,link,submitter,genre,votes,created_at').order('votes', { ascending: false }).order('created_at', { ascending: false }).limit(100);
       if (!dead) setProposals((pr.data ?? []) as Proposal[]);
+      // last 50 visible messages (RLS hides hidden and day-old rows); seen = 0 so history never pops a bubble
+      const cr = await c.from('chat_messages').select(CHAT_COLS).order('id', { ascending: false }).limit(50);
+      if (!dead) setChat((cur) => mergeChat(cur, ((cr.data ?? []) as ChatMsg[]).slice().reverse(), 0));
     })();
 
     const ch = c.channel('store', { config: { presence: { key: keyRef.current } } });
@@ -117,6 +123,12 @@ export function useStore() {
     };
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'proposals' }, upsertProposal);
     ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'proposals' }, upsertProposal);
+    ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, (p: any) => {
+      if (p.new?.id) setChat((cur) => mergeChat(cur, [p.new as ChatMsg], Date.now()));
+    });
+    ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages' }, (p: any) => {
+      if (p.new?.id && p.new.hidden) setChat((cur) => removeChat(cur, p.new.id));
+    });
     ch.on('broadcast', { event: 'move' }, ({ payload }: any) => {
       const { key, x, y } = payload ?? {};
       if (typeof key !== 'string' || key === keyRef.current || !Number.isFinite(x) || !Number.isFinite(y)) return;
@@ -331,6 +343,53 @@ export function useStore() {
     [say],
   );
 
+  /** Send a chat line. Returns an error line to show, or null when it was posted. */
+  const sendChat = useCallback(
+    async (text: string): Promise<string | null> => {
+      try {
+        const r = await fetch(`${API}/chat`, {
+          method: 'POST',
+          headers: clerkHeaders(memberRef.current),
+          body: JSON.stringify({ text, key: keyRef.current, ...(githubRef.current ? { github: githubRef.current } : {}) }),
+        });
+        const j = await r.json().catch(() => ({}));
+        const gate = gateReply(r.status, j, !!githubRef.current);
+        if (gate) {
+          if (gate.forget) {
+            clearGithub();
+            setGithubState(null);
+          }
+          return gate.line;
+        }
+        if (!r.ok) return j.error || 'Could not send that';
+        if (j.id) setChat((cur) => mergeChat(cur, [j as ChatMsg], Date.now())); // shows at once; the Realtime echo is deduped
+        return null;
+      } catch {
+        return 'Could not send that';
+      }
+    },
+    [],
+  );
+
+  const reportChat = useCallback(
+    async (id: number) => {
+      try {
+        const r = await fetch(`${API}/chat/report`, {
+          method: 'POST',
+          headers: clerkHeaders(memberRef.current),
+          body: JSON.stringify({ id, ...(githubRef.current ? { github: githubRef.current } : {}) }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) return say(j.error || 'Could not send the report');
+        setChat((cur) => removeChat(cur, id)); // gone for the reporter at once
+        say('Thanks, we will take a look.');
+      } catch {
+        say('Could not send the report');
+      }
+    },
+    [say],
+  );
+
   const connectGithub = useCallback((u: string) => {
     const login = u.trim().replace(/^@/, '');
     if (!login) return;
@@ -362,5 +421,5 @@ export function useStore() {
     [tapes],
   );
 
-  return { tapes, top10, visitors, me, setAisle, move, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, connectGithub, memberLogin: member?.login ?? null, member, canSignIn: canSignIn(import.meta.env.VITE_GITHUB_SIGNIN, !!sb), signIn, signOut, proposals, propose, backProposal, highlighted, toast, live };
+  return { tapes, top10, visitors, me, setAisle, move, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, connectGithub, memberLogin: member?.login ?? null, member, canSignIn: canSignIn(import.meta.env.VITE_GITHUB_SIGNIN, !!sb), signIn, signOut, proposals, propose, backProposal, chat, meKey: keyRef.current, sendChat, reportChat, highlighted, toast, live };
 }
