@@ -98,6 +98,18 @@ async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): P
   }
 }
 
+/** Today's chat moderation spend is under its own cap. Fails closed when the meter breaks. */
+async function chatBudgetLeft(): Promise<boolean> {
+  try {
+    const { data, error } = await admin().rpc('chat_spend_today');
+    if (error) throw error;
+    return Number(data ?? 0) < Number(env('AI_CHAT_BUDGET_USD') || '0.5');
+  } catch (e) {
+    console.warn('[chat] spend meter unavailable, resting', e);
+    return false;
+  }
+}
+
 /** Add up token counts when one request made several calls. */
 const sumUsage = (us: Parameters<OnUsage>[1][]): Parameters<OnUsage>[1] =>
   us.reduce((a, u) => ({
@@ -344,17 +356,12 @@ export async function handle(req: Request): Promise<Response> {
     if (path === 'chat/report') {
       const mid = Number(body.id);
       if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
-      if (limited(`report:${idKey}`, 10)) return json({ error: CHAT_LINES.limit }, 429);
-      if (limited(`reported:${idKey}:${mid}`, 1)) return json({ ok: true }); // already counted: one report per person per message
+      if (limited(`report:${idKey}`, 10) || limited('report-ip:' + who, 10)) return json({ error: CHAT_LINES.limit }, 429);
       try {
-        const db = admin();
-        const { data: row, error } = await db.from('chat_messages').select('reports,hidden').eq('id', mid).maybeSingle();
+        // One database call counts the report: one per reporter, none for your own message, removal at 3 distinct reporters.
+        const { data, error } = await admin().rpc('report_chat', { p_id: mid, p_reporter: idKey });
         if (error) throw error;
-        if (!row) return json({ error: CHAT_LINES.gone }, 404);
-        const reports = Number(row.reports ?? 0) + 1;
-        const { error: upErr } = await db.from('chat_messages').update({ reports, hidden: !!row.hidden || reports >= 3 }).eq('id', mid);
-        if (upErr) throw upErr;
-        return json({ ok: true });
+        return json({ ok: true, removed: data === true });
       } catch (e) {
         console.error('[chat:report]', e);
         return json({ error: 'Could not send the report' }, 500);
@@ -367,24 +374,30 @@ export async function handle(req: Request): Promise<Response> {
     if (limited(`chat:${idKey}`, 30) || limited('chat-ip:' + who, 60)) return json({ error: CHAT_LINES.limit }, 429);
     const checked = checkMessage(String(body.text ?? ''));
     if (!checked.ok) return json({ error: checked.reason }, 422);
-    // Haiku moderation only while the daily budget allows (and the spend meter works): over budget or a broken meter
-    // means the free checks above are all we have, per the roadmap. A moderation call that fails never posts unchecked.
-    if (await budgetLeft()) {
-      try {
-        const verdict = await meter('chat', (onUsage) => moderateChat(checked.text, onUsage));
-        if (!verdict.allowed) return json({ error: CHAT_LINES.moderated }, 422);
-      } catch (e) {
-        console.error('[chat:moderate]', e);
-        return json({ error: CHAT_LINES.busy }, 503);
-      }
+    // Moderation never switches off. Chat has its own daily budget (AI_CHAT_BUDGET_USD) so a spam wave cannot starve or
+    // outlast it; over that budget, a broken meter, or a failing moderator all mean "the chat is resting": nothing is posted.
+    if (!(await chatBudgetLeft())) return json({ error: CHAT_LINES.resting }, 503);
+    try {
+      const verdict = await meter('chat', (onUsage) => moderateChat(checked.text, onUsage));
+      if (!verdict.allowed) return json({ error: CHAT_LINES.moderated }, 422);
+    } catch (e) {
+      console.error('[chat:moderate]', e);
+      return json({ error: CHAT_LINES.busy }, 503);
     }
     try {
-      const { data, error } = await admin()
+      const db = admin();
+      const { data, error } = await db
         .from('chat_messages')
         .insert({ sender_key: key, login: id.github, tier: id.tier, body: checked.text })
         .select('id,at,sender_key,login,tier,body')
         .single();
-      if (error) throw error;
+      if (error || !data) throw error ?? new Error('no row');
+      // The identity key sits in its own table: Realtime sends whole rows, and anon must not see it.
+      const { error: senderErr } = await db.from('chat_senders').insert({ message_id: data.id, sender_id: idKey });
+      if (senderErr) {
+        await db.from('chat_messages').delete().eq('id', data.id); // never leave a message nobody can be held to
+        throw senderErr;
+      }
       return json(data);
     } catch (e) {
       console.error('[chat]', e);
@@ -392,14 +405,15 @@ export async function handle(req: Request): Promise<Response> {
     }
   }
 
-  // --- admin: take a chat message down (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
+  // --- admin: delete a chat message for good (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
   if (path === 'chat/delete' && req.method === 'POST') {
+    if (limited('delete-ip:' + who, 20)) return json({ error: CHAT_LINES.limit }, 429); // counts wrong tokens too
     const secret = env('ADMIN_TOKEN');
     if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
     const mid = Number(body.id);
     if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
-    const { error } = await admin().from('chat_messages').update({ hidden: true }).eq('id', mid);
-    return error ? json({ error: 'Could not hide the message' }, 500) : json({ ok: true });
+    const { error } = await admin().from('chat_messages').delete().eq('id', mid);
+    return error ? json({ error: 'Could not delete the message' }, 500) : json({ ok: true });
   }
 
   return json({ error: 'Not found' }, 404);
