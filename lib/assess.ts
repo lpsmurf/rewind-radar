@@ -238,6 +238,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     const signals = healthSignals(facts);
     const cands = await candidates(`${facts.full_name} ${facts.description ?? ''} ${facts.topics.join(' ')}`, 20);
     const { raw, usage, model } = await assessRepoAI(facts, signals, facts.readme, cands);
+    const cost = await recordUsage('assess', model, usage, key); // meter before anything else can throw
     const assessment = clampRing(normalizeAssessment(raw, cands.map((c) => c.slug)), signals);
     const repo: RepoSummary = {
       full_name: facts.full_name,
@@ -253,7 +254,6 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
       open_issues: facts.open_issues,
       signals,
     };
-    const cost = await recordUsage('assess', model, usage, key);
     const reviewed_at = new Date().toISOString();
     const { error } = await admin().from('assessments').upsert({
       repo: key,

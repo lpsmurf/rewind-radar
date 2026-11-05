@@ -362,3 +362,26 @@ describe('rows served from cache are clamped on read', () => {
     expect((await getAssessment(ref, allow))!.assessment.ring).toBe('adopt');
   });
 });
+
+describe('usage is metered once, right after the Sonnet call', () => {
+  const inserts = (d: any) => d.calls('ai_usage').filter((q: Query) => has(q, 'insert'));
+
+  it('records exactly one usage row even when the work after the call throws', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    d.on('assessments', (q: Query) => {
+      if (has(q, 'upsert')) throw new Error('db down');
+      return { data: null, error: null };
+    });
+    await expect(getAssessment(ref, allow)).rejects.toThrow('db down');
+    expect(inserts(d)).toHaveLength(1);
+    expect(arg(inserts(d)[0], 'insert')).toMatchObject({ route: 'assess', model: SONNET, repo: 'gitroomhq/postiz-app' });
+  });
+
+  it('records exactly one usage row on success', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    await getAssessment(ref, allow);
+    expect(inserts(d)).toHaveLength(1);
+  });
+});
