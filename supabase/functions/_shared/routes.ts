@@ -1,12 +1,15 @@
 import { admin } from './admin.ts';
-import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
+import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
-import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
+import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
 import { refreshRadar } from './radar.ts';
+import { SOURCES } from './sources/index.ts';
+import { liveCtx, manualSource, runSources } from './sources/pipeline.ts';
+import { stockedTape } from './sources/stock.ts';
 import { env } from './env.ts';
 import { aisleOf } from './types.ts';
 
@@ -414,6 +417,105 @@ export async function handle(req: Request): Promise<Response> {
     if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
     const { error } = await admin().from('chat_messages').delete().eq('id', mid);
     return error ? json({ error: 'Could not delete the message' }, 500) : json({ ok: true });
+  }
+
+  // --- sources: pg_cron calls this weekly (header x-cron-secret must equal CRON_SECRET; unset means always 403) ---
+  if (path === 'sources/run' && req.method === 'POST') {
+    const secret = env('CRON_SECRET');
+    if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const job = runSources(SOURCES, liveCtx());
+    const rt = (globalThis as any).EdgeRuntime;
+    if (rt?.waitUntil) {
+      rt.waitUntil(job.catch((e) => console.error('[sources]', e))); // keep working after we answer the cron call
+      return json({ ok: true, started: true }, 202);
+    }
+    try {
+      return json({ ok: true, ...(await job) });
+    } catch (e) {
+      console.error('[sources]', e);
+      return json({ error: 'Source run failed' }, 500);
+    }
+  }
+
+  // --- admin panel API: header x-admin-token must equal ADMIN_TOKEN (unset means always 403); 60 calls an hour per IP, wrong tokens included ---
+  if (path.startsWith('admin/')) {
+    if (limited('admin-ip:' + who, 60)) return json({ error: 'Too many requests' }, 429);
+    const secret = env('ADMIN_TOKEN');
+    if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const q = new URL(req.url).searchParams;
+    const db = admin();
+
+    if (path === 'admin/queue' && req.method === 'GET') {
+      const status = q.get('status') ?? 'pending';
+      if (!['pending', 'approved', 'rejected', 'stocked'].includes(status)) return json({ error: 'Bad status' }, 400);
+      const { data, error } = await db.from('ingest_queue').select('*').eq('status', status).order('at', { ascending: false }).limit(200);
+      return error ? json({ error: 'Could not read the queue' }, 500) : json({ items: data ?? [] });
+    }
+
+    const act = /^admin\/queue\/([^/]+)\/(approve|reject)$/.exec(path);
+    if (act && req.method === 'POST') {
+      const id = Number(act[1]);
+      if (!Number.isSafeInteger(id) || id < 1) return json({ error: 'Bad id' }, 400);
+      if (act[2] === 'reject') {
+        const { data, error } = await db
+          .from('ingest_queue')
+          .update({ status: 'rejected', decided_at: new Date().toISOString() })
+          .eq('id', id)
+          .neq('status', 'stocked')
+          .select('id')
+          .maybeSingle();
+        if (error) return json({ error: 'Could not reject' }, 500);
+        return data ? json({ ok: true }) : json({ error: 'Not found' }, 404);
+      }
+      try {
+        const { data: row, error } = await db.from('ingest_queue').select('*').eq('id', id).maybeSingle();
+        if (error) throw error;
+        if (!row) return json({ error: 'Not found' }, 404);
+        if (row.status !== 'pending' && row.status !== 'approved') return json({ error: `Already ${row.status}` }, 409);
+        if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
+        const ref = parseRepoRef(row.repo);
+        const facts = ref ? await fetchRepoFacts(ref) : null;
+        if (!facts) return json({ error: 'That repo is no longer on GitHub' }, 404);
+        const review = await meter('admin', (onUsage) => reviewRepo(facts, onUsage));
+        const tape = stockedTape(facts, review, { url: row.credit_url, title: row.credit_title });
+        const ins = await db.from('tapes').insert(tape).select('id').single();
+        if (ins.error && ins.error.code !== '23505') throw ins.error;
+        await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
+        return ins.error ? json({ error: 'Already in the store' }, 409) : json({ ok: true, slug: tape.slug });
+      } catch (e) {
+        console.error('[admin:approve]', e);
+        return json({ error: 'Could not stock that tape' }, 500);
+      }
+    }
+
+    if (path === 'admin/paste' && req.method === 'POST') {
+      const urls = body.urls;
+      if (!Array.isArray(urls) || urls.length < 1 || urls.length > 20 || !urls.every((u) => typeof u === 'string')) {
+        return json({ error: 'Send 1 to 20 links as urls: string[]' }, 400);
+      }
+      try {
+        // pasted links use no AI, so they ignore the daily budget
+        const out = await runSources([manualSource(urls.map((u) => u.slice(0, 300)))], { ...liveCtx(), budget: async () => true });
+        const s = out.sources[0];
+        if (s.error) return json({ error: s.error }, 500);
+        return json({ ok: true, found: s.found, queued: s.queued, ignored: urls.length - s.found });
+      } catch (e) {
+        console.error('[admin:paste]', e);
+        return json({ error: 'Could not queue those links' }, 500);
+      }
+    }
+
+    if (path === 'admin/spend' && req.method === 'GET') {
+      const n = Number(q.get('days'));
+      const days = Number.isFinite(n) && n >= 1 ? Math.min(90, Math.floor(n)) : 14;
+      const { data, error } = await db.rpc('spend_by_day', { days });
+      return error ? json({ error: 'Could not read spend' }, 500) : json({ days, rows: data ?? [] });
+    }
+
+    if (path === 'admin/runs' && req.method === 'GET') {
+      const { data, error } = await db.from('source_runs').select('*').order('at', { ascending: false }).limit(20);
+      return error ? json({ error: 'Could not read runs' }, 500) : json({ runs: data ?? [] });
+    }
   }
 
   return json({ error: 'Not found' }, 404);
