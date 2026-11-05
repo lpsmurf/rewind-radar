@@ -13,6 +13,9 @@ export const ASSESS_TTL_DAYS = 7;
 
 export class RateLimitError extends Error {}
 export class BudgetError extends Error {}
+/** The same repo was assessed (and failed) or is being assessed right now: wait a few minutes. */
+export class BusyError extends Error {}
+const BUSY_MS = 10 * 60_000;
 
 type Usage = Parameters<OnUsage>[1];
 
@@ -130,11 +133,12 @@ export interface Reservation {
  * Database-backed caps on one Sonnet route, shared by every Edge isolate: calls per hour, and spend per UTC day
  * (its own budget, smaller than the clerk's). Reserve-then-check: a placeholder row (estimated cost) goes in first,
  * then the limit query sees it and every concurrent one, so a burst can over-refuse but never overshoot.
- * Throws RateLimitError / BudgetError (the placeholder is deleted); fails closed if the insert or the query breaks.
+ * With `busyRepo`, another row for that repo in the last 10 minutes (failed, or in flight) throws BusyError.
+ * Throws RateLimitError / BudgetError / BusyError (the placeholder is deleted); fails closed if the insert or the query breaks.
  */
 export async function reserve(
   route: string,
-  o: { maxPerHour: number; budgetUsd: number; reserveUsd: number; model: string; repo?: string },
+  o: { maxPerHour: number; budgetUsd: number; reserveUsd: number; model: string; repo?: string; busyRepo?: string },
 ): Promise<Reservation> {
   let id: unknown;
   try {
@@ -161,9 +165,9 @@ export async function reserve(
     const now = Date.now();
     const dayStart = new Date(now);
     dayStart.setUTCHours(0, 0, 0, 0);
-    let rows: { id: unknown; at: string; cost_usd: number }[];
+    let rows: { id: unknown; at: string; cost_usd: number; repo: string | null }[];
     try {
-      const { data, error } = await admin().from('ai_usage').select('id,at,cost_usd').eq('route', route).gte('at', dayStart.toISOString());
+      const { data, error } = await admin().from('ai_usage').select('id,at,cost_usd,repo').eq('route', route).gte('at', dayStart.toISOString());
       if (error) throw error;
       rows = (data ?? []) as typeof rows;
     } catch (e) {
@@ -171,6 +175,7 @@ export async function reserve(
       throw new BudgetError();
     }
     const others = rows.filter((r) => r.id !== id); // our own placeholder is counted by adding it, not by the query
+    if (o.busyRepo && others.some((r) => r.repo === o.busyRepo && now - Date.parse(r.at) < BUSY_MS)) throw new BusyError();
     if (others.filter((r) => now - Date.parse(r.at) < 3600_000).length >= o.maxPerHour) throw new RateLimitError();
     if (others.reduce((sum, r) => sum + Number(r.cost_usd ?? 0), 0) + o.reserveUsd > o.budgetUsd) throw new BudgetError();
   } catch (e) {
@@ -209,6 +214,7 @@ const reserveAssess = (key: string) =>
     reserveUsd: Number(env('AI_ASSESS_RESERVE_USD') || '0.05'),
     model: env('ASSESS_MODEL') || SONNET,
     repo: key,
+    busyRepo: key,
   });
 
 /** Log one Anthropic call to ai_usage and return its cost. Never throws. */
@@ -255,7 +261,8 @@ const fromRow = (row: Row, stale = false): AssessmentResult => ({
 /**
  * Cached for ASSESS_TTL_DAYS. A miss costs one GitHub read and one Sonnet call, so it must pass `allowMiss`
  * (per-IP limit), the database hourly/assess-budget caps and the daily budget; if any of them says no, or the
- * refresh breaks, an old row is served as stale (RateLimitError/BudgetError only when there is no row).
+ * refresh breaks, an old row is served as stale (RateLimitError/BudgetError only when there is no row). A repo
+ * assessed in the last 10 minutes (it failed, or another request is on it) is not assessed again: stale row or BusyError.
  * null = GitHub has no such repo. A bare owner/repo is verified to exist first.
  */
 export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean }): Promise<AssessmentResult | null> {

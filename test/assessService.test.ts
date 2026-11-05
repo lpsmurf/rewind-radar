@@ -7,7 +7,7 @@ const { create, db } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null 
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
-import { budgetLeft, BudgetError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
+import { budgetLeft, BudgetError, BusyError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
 import { clearRepoExistsCache, parseRepoRef, repoExists } from '../lib/github.ts';
 import { AssessError, SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
@@ -159,7 +159,7 @@ describe('database-backed assess limits', () => {
     const d = setup(null);
     await getAssessment(ref, allow);
     const q = d.calls('ai_usage').find((x: Query) => has(x, 'select') && !has(x, 'insert'))!;
-    expect(arg(q, 'select')).toBe('id,at,cost_usd');
+    expect(arg(q, 'select')).toBe('id,at,cost_usd,repo');
     expect(has(q, 'eq', 'route', 'assess')).toBe(true);
     const since = q.calls.find((c: any) => c[0] === 'gte')!;
     expect(since[1]).toBe('at');
@@ -519,5 +519,52 @@ describe('reserve before calling Sonnet', () => {
     d.on('ai_usage', usageTable([], { insertError: true }));
     expect(await getAssessment(ref, allow)).toMatchObject({ stale: true });
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe('no repeat of a failed or in-flight assessment for 10 minutes', () => {
+  const recent = (minsAgo: number, repo = 'gitroomhq/postiz-app', o: Record<string, unknown> = {}) => ({
+    at: new Date(Date.now() - minsAgo * 60_000).toISOString(),
+    cost_usd: 0.01,
+    repo,
+    ...o,
+  });
+
+  it('throws BusyError, without calling Sonnet, when the same repo has an assess row from the last 10 minutes', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null, 0, [recent(2)]);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BusyError);
+    expect(create).not.toHaveBeenCalled();
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(true); // our own reservation is released
+  });
+
+  it('serves the stale row instead when there is one', async () => {
+    const d = setup(row({ updated_at: daysAgo(8) }), 0, [recent(2)]);
+    expect(await getAssessment(ref, allow)).toMatchObject({ cached: true, stale: true });
+    expect(create).not.toHaveBeenCalled();
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(true);
+  });
+
+  it('assesses normally when the last row is older than 10 minutes', async () => {
+    stubGitHub(POSTIZ);
+    setup(null, 0, [recent(11)]);
+    expect((await getAssessment(ref, allow))!.cached).toBe(false);
+  });
+
+  it('is not affected by a recent row for a different repo', async () => {
+    stubGitHub(POSTIZ);
+    setup(null, 0, [recent(1, 'someone/else')]);
+    expect((await getAssessment(ref, allow))!.cached).toBe(false);
+  });
+
+  it('does not count its own reservation as a recent assessment', async () => {
+    stubGitHub(POSTIZ);
+    setup(null, 0, [recent(0, 'gitroomhq/postiz-app', { id: 900 })]); // the database returns our own placeholder too
+    expect((await getAssessment(ref, allow))!.cached).toBe(false);
+  });
+
+  it('counts an in-flight reservation from another request', async () => {
+    setup(null, 0, [recent(0, 'gitroomhq/postiz-app', { id: 12 })]);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BusyError);
   });
 });

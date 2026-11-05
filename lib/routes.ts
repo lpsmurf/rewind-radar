@@ -1,6 +1,6 @@
 import { admin } from './admin.ts';
 import { clerk, recommendForProfile, reviewProposal, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
-import { BudgetError, budgetLeft, getAssessment, personalFit, RateLimitError, recordUsage, reserve } from './assess.ts';
+import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
@@ -117,6 +117,7 @@ export async function handle(req: Request): Promise<Response> {
         if (!q.ref.bare) {
           if (e instanceof RateLimitError) return json({ error: CLERK_LINES.rateLimit }, 429);
           if (e instanceof BudgetError) return json({ answer: CLERK_LINES.budget, ...plain });
+          if (e instanceof BusyError) return json({ error: CLERK_LINES.busy }, 503);
           if (e instanceof GitHubError) return json({ error: 'GitHub is rate-limiting the clerk. Try again in a few minutes.' }, 503);
           console.error('[clerk:assess]', e);
           return json({ error: 'The clerk is on break.' }, 500);

@@ -165,6 +165,29 @@ describe('POST /clerk: pasted repos', () => {
     expect(r.status).toBe(503);
   });
 
+  describe('a recent failed or in-flight assessment of the same repo', () => {
+    const busyRows = [{ at: new Date().toISOString(), cost_usd: 0.01, repo: 'gitroomhq/postiz-app', id: 5 }];
+
+    it('503s with the in-character busy line for a pasted URL', async () => {
+      stubGitHub(POSTIZ);
+      const d = setup();
+      d.on('ai_usage', usageTable(busyRows));
+      const r = await post('clerk', { question: 'https://github.com/gitroomhq/postiz-app', visitorId: vid() });
+      expect(r).toEqual({ status: 503, body: { error: CLERK_LINES.busy } });
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('falls through to the ask path for a bare owner/repo', async () => {
+      stubGitHub(POSTIZ);
+      const d = setup();
+      d.on('ai_usage', usageTable(busyRows));
+      create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Try these.', slugs: [], aisle: 'counter' }));
+      const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() });
+      expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+      expect(create.mock.calls[0][0].model).toBe(HAIKU);
+    });
+  });
+
   it('limits a client IP to 5 new assessments an hour', async () => {
     stubGitHub(POSTIZ);
     setup();
