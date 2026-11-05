@@ -180,7 +180,8 @@ export interface AssessmentResult {
 interface Row { data: Assessment; facts: RepoSummary; updated_at: string; prompt_version: number; hits: number | null }
 
 const fromRow = (row: Row, stale = false): AssessmentResult => ({
-  assessment: row.data,
+  // older rows (before the code-side ring clamp) must not serve an unclamped verdict
+  assessment: row.facts?.signals ? clampRing(row.data, row.facts.signals) : row.data,
   repo: row.facts,
   reviewed_at: row.updated_at,
   cached: true,

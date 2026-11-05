@@ -334,3 +334,31 @@ describe('check order: refused requests do not use the per-IP slot', () => {
     expect(allowMiss).not.toHaveBeenCalled();
   });
 });
+
+describe('rows served from cache are clamped on read', () => {
+  const archived = { archived: true, licence_kind: 'permissive', days_since_push: 3 };
+  const adopt = (o: Record<string, unknown> = {}) =>
+    row({
+      data: { ...SAMPLE, ai_directed_text: false, ring: 'adopt', risks: [] },
+      facts: { full_name: 'gitroomhq/postiz-app', html_url: 'x', signals: archived },
+      ...o,
+    });
+
+  it('caps a fresh row whose stored ring is adopt but whose signals say archived', async () => {
+    setup(adopt());
+    const r = await getAssessment(ref, allow);
+    expect(r!.assessment.ring).toBe('hold');
+    expect(r!.assessment.risks[0]).toMatch(/archived/);
+  });
+
+  it('caps a stale row too', async () => {
+    setup(adopt({ updated_at: daysAgo(8) }), 0);
+    const r = await getAssessment(ref, { allowMiss: () => false });
+    expect(r).toMatchObject({ stale: true, assessment: { ring: 'hold' } });
+  });
+
+  it('leaves rows without stored signals alone', async () => {
+    setup(row({ data: { ...SAMPLE, ai_directed_text: false, ring: 'adopt' } }));
+    expect((await getAssessment(ref, allow))!.assessment.ring).toBe('adopt');
+  });
+});
