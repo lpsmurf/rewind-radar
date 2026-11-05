@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adminHeaders, formatUsd, isAdminHash, isChannelId, linesOf, pastedUrls, spendTable, shortDate } from '../src/lib/adminPanel.ts';
+import { adminHeaders, safeHref, formatUsd, isAdminHash, isChannelId, linesOf, pastedUrls, spendTable, shortDate } from '../src/lib/adminPanel.ts';
 
 describe('isAdminHash', () => {
   it('matches #admin only', () => {
@@ -72,5 +72,18 @@ describe('isChannelId', () => {
     expect(isChannelId('UC' + 'a'.repeat(21))).toBe(false);
     expect(isChannelId('XX' + 'a'.repeat(22))).toBe(false);
     expect(isChannelId('UC' + 'a'.repeat(22) + '\n')).toBe(false);
+  });
+});
+
+describe('safeHref', () => {
+  it('passes http and https links through', () => {
+    expect(safeHref('https://youtu.be/x')).toBe('https://youtu.be/x');
+    expect(safeHref('http://example.com/a?b=1')).toBe('http://example.com/a?b=1');
+    expect(safeHref('HTTPS://EXAMPLE.COM')).toBe('HTTPS://EXAMPLE.COM');
+  });
+  it('refuses everything else, so a credit can never become a javascript: link', () => {
+    for (const u of ['javascript:alert(1)', ' javascript:alert(1)', 'data:text/html,x', 'vbscript:x', '//evil.example', 'ftp://x', 'youtu.be/x', 'https:/x', '', null, undefined]) {
+      expect(safeHref(u as any), String(u)).toBeNull();
+    }
   });
 });

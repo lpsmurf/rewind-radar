@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { API } from '../lib/api';
-import { adminHeaders, formatUsd, isChannelId, linesOf, pastedUrls, shortDate, spendTable, type SpendRow } from '../lib/adminPanel';
+import { adminHeaders, formatUsd, isChannelId, linesOf, pastedUrls, safeHref, shortDate, spendTable, type SpendRow } from '../lib/adminPanel';
 
 const KEY = 'rr-admin-token'; // sessionStorage only: gone when the tab closes
 type Tab = 'queue' | 'paste' | 'spend' | 'runs' | 'config';
@@ -121,7 +121,7 @@ function Queue({ token, fail }: TabProps) {
           {it.why && <p className="small">{it.why}</p>}
           {it.credit_url && (
             <p className="small">
-              Featured in <a href={it.credit_url} target="_blank" rel="noreferrer">{it.credit_title || it.credit_url}</a>
+              Featured in {safeHref(it.credit_url) ? <a href={safeHref(it.credit_url)!} target="_blank" rel="noreferrer">{it.credit_title || it.credit_url}</a> : <span>{it.credit_title || it.credit_url}</span>}
               {it.credit_author && ` by ${it.credit_author}`}
             </p>
           )}

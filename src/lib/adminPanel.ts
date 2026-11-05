@@ -9,6 +9,9 @@ export function formatUsd(v: number | string | null | undefined): string {
   return n !== 0 && Math.abs(n) < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`;
 }
 
+/** A link target safe to put in href: only http(s) URLs. A credit link comes from a video or web page, so it may be hostile (javascript:, data:). Otherwise null: show plain text. */
+export const safeHref = (url: string | null | undefined): string | null => (typeof url === 'string' && /^https?:\/\//i.test(url) ? url : null);
+
 /** The paste box: links separated by whitespace or commas, no blanks or repeats, at most 20 (the API limit). */
 export function pastedUrls(text: string): string[] {
   return [...new Set(text.split(/[\s,]+/).filter(Boolean))].slice(0, 20);
