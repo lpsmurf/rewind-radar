@@ -5,12 +5,15 @@ import { RING_COLORS, type Tape } from './types';
 import TapePanel from './ui/TapePanel';
 import ClerkDrawer from './ui/ClerkDrawer';
 import SubmitModal from './ui/SubmitModal';
+import ProposalsBoard from './ui/ProposalsBoard';
+import ProposeModal from './ui/ProposeModal';
 
 export default function App() {
   const s = useStore();
   const [open, setOpen] = useState<Tape | null>(null);
   const [clerkOpen, setClerkOpen] = useState(false);
   const [submitOpen, setSubmitOpen] = useState(false);
+  const [proposeOpen, setProposeOpen] = useState(false);
   const cur = open ? s.tapes.find((t) => t.id === open.id) ?? open : null;
   const chips = s.tapes.filter((t) => s.highlighted.has(t.id));
 
@@ -25,6 +28,7 @@ export default function App() {
         <div className="row">
           <button className="btn" onClick={() => setClerkOpen(true)}>ASK THE CLERK</button>
           <button className="btn alt" onClick={() => setSubmitOpen(true)}>SUBMIT YOUR PROJECT</button>
+          <button className="btn" onClick={() => setProposeOpen(true)}>PROPOSE AN IDEA</button>
         </div>
       </header>
       <main>
@@ -49,6 +53,7 @@ export default function App() {
               ))}
             </ol>
           </div>
+          <ProposalsBoard proposals={s.proposals} onBack={s.backProposal} onPropose={() => setProposeOpen(true)} />
           <div className="panel">
             <h3>RINGS</h3>
             {(['adopt', 'trial', 'assess', 'hold'] as const).map((r) => (
@@ -60,6 +65,7 @@ export default function App() {
       {cur && <TapePanel tape={cur} onClose={() => setOpen(null)} onRent={() => s.rent(cur)} onVote={() => s.vote(cur)} />}
       {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} />}
       {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} />}
+      {proposeOpen && <ProposeModal onClose={() => setProposeOpen(false)} propose={s.propose} />}
       {s.toast && <div className="toast">{s.toast}</div>}
     </div>
   );

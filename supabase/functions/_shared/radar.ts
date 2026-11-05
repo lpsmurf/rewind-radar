@@ -35,11 +35,16 @@ export async function refreshRadar(n = 20): Promise<number> {
       ring: rev.ring,
       rating: rev.rating,
       trust: 'clean',
+      archived: false,
       week: week.toISOString().slice(0, 10),
     };
   });
   const { error } = await admin().from('tapes').upsert(rows, { onConflict: 'slug' });
   if (error) throw new Error(error.message);
+  // Retire repos from earlier runs: they leave the wall but keep their votes.
+  const keep = rows.map((r) => `"${r.slug}"`).join(',');
+  const { error: e2 } = await admin().from('tapes').update({ archived: true }).eq('kind', 'repo').not('slug', 'in', `(${keep})`);
+  if (e2) throw new Error(e2.message);
   return rows.length;
 }
 

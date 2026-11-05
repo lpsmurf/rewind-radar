@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API, API_ABS } from './api';
-import type { Aisle, Tape, Visitor } from '../types';
+import type { Aisle, Proposal, Tape, Visitor } from '../types';
 import { GENRES } from '../types';
 import { MOCK_TAPES } from '../data/mock';
 import { sb } from './supabase';
@@ -21,6 +21,8 @@ export function useStore() {
   const [aisle, setAisleState] = useState<Aisle>('entrance');
   const [tapes, setTapes] = useState<Tape[]>(sb ? [] : MOCK_TAPES);
   const [visitors, setVisitors] = useState<Visitor[]>([]);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const backedRef = useRef<Set<string>>(new Set());
   const [highlighted, setHighlighted] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const [live, setLive] = useState(false);
@@ -41,12 +43,14 @@ export function useStore() {
     let dead = false;
     (async () => {
       const [tr, vr] = await Promise.all([
-        c.from('tapes').select(COLS).order('created_at', { ascending: false }).limit(500),
+        c.from('tapes').select(COLS).eq('archived', false).order('created_at', { ascending: false }).limit(500),
         c.from('tape_votes').select('tape_id,votes'),
       ]);
       if (dead) return;
       const vm = new Map<string, number>((vr.data ?? []).map((r: any) => [r.tape_id, r.votes]));
       setTapes(((tr.data ?? []) as any[]).map((t) => ({ ...t, votes: vm.get(t.id) ?? 0 }) as Tape));
+      const pr = await c.from('proposals').select('id,kind,title,pitch,link,submitter,genre,votes,created_at').order('votes', { ascending: false }).order('created_at', { ascending: false }).limit(100);
+      if (!dead) setProposals((pr.data ?? []) as Proposal[]);
     })();
 
     const ch = c.channel('store', { config: { presence: { key: meRef.current.id } } });
@@ -58,6 +62,7 @@ export function useStore() {
     const upsert = (p: any) => {
       const n = p.new;
       if (!n?.id) return;
+      if (n.archived) return setTapes((ts) => ts.filter((t) => t.id !== n.id)); // retired New Release
       setTapes((ts) => {
         const i = ts.findIndex((t) => t.id === n.id);
         if (i < 0) return [{ ...n, votes: 0 }, ...ts];
@@ -68,6 +73,17 @@ export function useStore() {
     };
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'tapes' }, upsert);
     ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'tapes' }, upsert);
+    const upsertProposal = (p: any) => {
+      const n = p.new as Proposal;
+      if (!n?.id) return;
+      setProposals((ps) => {
+        const i = ps.findIndex((x) => x.id === n.id);
+        const next = i < 0 ? [n, ...ps] : ps.map((x) => (x.id === n.id ? { ...x, ...n } : x));
+        return next.sort((a, b) => b.votes - a.votes || b.created_at.localeCompare(a.created_at));
+      });
+    };
+    ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'proposals' }, upsertProposal);
+    ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'proposals' }, upsertProposal);
     ch.on('presence', { event: 'sync' }, () => {
       const st = ch.presenceState() as Record<string, any[]>;
       setVisitors(
@@ -206,6 +222,42 @@ export function useStore() {
     [setAisle],
   );
 
+  const propose = useCallback(
+    async (f: { title: string; pitch: string; link: string; submitter: string }): Promise<string | null> => {
+      if (!sb) return 'Proposals need the live store';
+      try {
+        const r = await fetch(`${API}/propose`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...f, visitorId: meRef.current.id }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) return j.error || 'Could not send your proposal';
+        setProposals((ps) => (ps.some((x) => x.id === j.id) ? ps : [...ps, j as Proposal]));
+        say('In the Request Box! Rally some votes.');
+        return null;
+      } catch {
+        return 'Could not send your proposal';
+      }
+    },
+    [say],
+  );
+
+  const backProposal = useCallback(
+    async (p: Proposal) => {
+      if (!sb) return;
+      if (backedRef.current.has(p.id)) return say('You already backed this one');
+      backedRef.current.add(p.id);
+      setProposals((ps) => ps.map((x) => (x.id === p.id ? { ...x, votes: x.votes + 1 } : x)));
+      const { error } = await sb.from('proposal_votes').insert({ visitor_id: meRef.current.id, proposal_id: p.id });
+      if (error) {
+        setProposals((ps) => ps.map((x) => (x.id === p.id ? { ...x, votes: Math.max(0, x.votes - 1) } : x)));
+        say(error.code === '23505' ? 'You already backed this one' : 'Vote failed');
+      }
+    },
+    [say],
+  );
+
   const tapesRef = useRef<Tape[]>(tapes);
   tapesRef.current = tapes;
 
@@ -214,5 +266,5 @@ export function useStore() {
     [tapes],
   );
 
-  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, highlighted, toast, live };
+  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, proposals, propose, backProposal, highlighted, toast, live };
 }

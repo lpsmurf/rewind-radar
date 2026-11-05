@@ -50,3 +50,15 @@ fieldset{border:0;padding:0;margin:0}
 .msg { white-space: pre-line; }
 .row.scan { margin-bottom: 8px; }
 .row.scan .btn { white-space: nowrap; font-size: 9px; }
+
+/* Request Box */
+.btn.full { width: 100%; margin: 6px 0 10px; }
+.proposals { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.proposals li { display: grid; grid-template-columns: 44px 1fr; gap: 8px; align-items: start; border-top: 2px dashed rgba(255, 210, 0, 0.25); padding-top: 8px; }
+.proposals .back { font: inherit; font-size: 9px; background: #ffd200; color: #0b2a6f; border: 3px solid #061846; cursor: pointer; padding: 6px 2px; display: grid; gap: 2px; justify-items: center; }
+.proposals .back:hover { filter: brightness(1.1); }
+.proposals .back b { font-size: 10px; }
+.ptitle { font-size: 9px; line-height: 1.5; margin: 0 0 4px; word-break: break-word; }
+.ptitle a { color: #ffd200; }
+.small.dim { opacity: 0.7; }
+textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; resize: vertical; }

@@ -72,3 +72,16 @@ export const PALETTE = {
   floorA: '#243b7a',
   floorB: '#1d3168',
 };
+
+/** Request Box entry: an idea, a skill to build, or a repo to stock. */
+export interface Proposal {
+  id: string;
+  kind: 'idea' | 'skill' | 'repo';
+  title: string;
+  pitch: string;
+  link: string | null;
+  submitter: string | null;
+  genre: string | null;
+  votes: number;
+  created_at: string;
+}

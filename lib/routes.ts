@@ -1,5 +1,5 @@
 import { admin } from './admin.ts';
-import { clerk, recommendForProfile, reviewSubmission } from './ai.ts';
+import { clerk, recommendForProfile, reviewProposal, reviewSubmission } from './ai.ts';
 import { fetchProfile, fetchRepo } from './github.ts';
 import { refreshRadar } from './radar.ts';
 import { env } from './env.ts';
@@ -114,15 +114,57 @@ export async function handle(req: Request): Promise<Response> {
     return new Response(data.body_md, { headers: { ...CORS, 'content-type': 'text/markdown; charset=utf-8' } });
   }
 
-  // --- weekly radar refresh (cron) ---
+  // --- radar refresh: pg_cron calls this Mon + Thu; it refuses to run again within 60 hours ---
   if (path === 'radar/refresh') {
     const secret = env('CRON_SECRET');
-    if (!secret || req.headers.get('x-cron-secret') !== secret) return json({ error: 'Unauthorized' }, 401);
+    const forced = !!secret && req.headers.get('x-cron-secret') === secret;
+    const db = admin();
+    const { data: last } = await db.from('radar_runs').select('ran_at').order('ran_at', { ascending: false }).limit(1).maybeSingle();
+    const hours = last ? (Date.now() - new Date(last.ran_at).getTime()) / 36e5 : Infinity;
+    if (!forced && hours < 60) return json({ ok: true, skipped: true, due_in_hours: Math.ceil(60 - hours) });
+    const { data: run, error } = await db.from('radar_runs').insert({ stocked: 0 }).select('id').single();
+    if (error || !run) return json({ error: 'Could not start refresh' }, 500);
+    const job = refreshRadar(20)
+      .then(async (n) => { await db.from('radar_runs').update({ stocked: n }).eq('id', run.id); return n; })
+      .catch(async (e) => { console.error('[radar]', e); await db.from('radar_runs').delete().eq('id', run.id); throw e; });
+    const rt = (globalThis as any).EdgeRuntime;
+    if (rt?.waitUntil) {
+      rt.waitUntil(job.catch(() => 0)); // keep working after we answer the cron call
+      return json({ ok: true, started: true }, 202);
+    }
     try {
-      return json({ ok: true, stocked: await refreshRadar(20) });
-    } catch (e) {
-      console.error('[radar]', e);
+      return json({ ok: true, stocked: await job });
+    } catch {
       return json({ error: 'Radar refresh failed' }, 500);
+    }
+  }
+
+  // --- Request Box: visitor proposals (Claude screens for spam) ---
+  if (path === 'propose' && req.method === 'POST') {
+    const title = String(body.title ?? '').trim();
+    const pitch = String(body.pitch ?? '').trim();
+    const link = String(body.link ?? '').trim();
+    const submitter = String(body.submitter ?? '').trim();
+    const visitorId = String(body.visitorId ?? '');
+    if (title.length < 3 || title.length > 80) return json({ error: 'Title must be 3-80 characters' }, 400);
+    if (pitch.length > 400) return json({ error: 'Pitch must be 400 characters or fewer' }, 400);
+    if (link && !/^https:\/\/[^\s]{4,300}$/.test(link)) return json({ error: 'Link must start with https://' }, 400);
+    if (submitter.length > 30) return json({ error: 'Handle must be 30 characters or fewer' }, 400);
+    if (visitorId.length < 8 || visitorId.length > 64) return json({ error: 'Missing visitor id' }, 400);
+    if (limited('propose:' + who, 5)) return json({ error: 'Max 5 proposals per hour' }, 429);
+    try {
+      const r = await reviewProposal({ title, pitch, link });
+      if (!r.allowed) return json({ error: `The clerk turned this one down: ${r.reason || 'not a fit for the store'}` }, 422);
+      const { data, error } = await admin()
+        .from('proposals')
+        .insert({ visitor_id: visitorId, kind: r.kind, title, pitch: r.pitch || pitch, link: link || null, submitter: submitter || null, genre: r.genre })
+        .select('id,kind,title,pitch,link,submitter,genre,votes,created_at')
+        .single();
+      if (error) return json({ error: 'Could not save proposal' }, 500);
+      return json(data);
+    } catch (e) {
+      console.error('[propose]', e);
+      return json({ error: 'The clerk is on break.' }, 500);
     }
   }
 
