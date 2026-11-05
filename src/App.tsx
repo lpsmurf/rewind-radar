@@ -65,6 +65,7 @@ export default function App() {
             meKey={s.meKey}
             highlighted={s.highlighted}
             top10={s.top10}
+            monthly={s.monthly}
             onTapeClick={setOpen}
             onCounterClick={() => setClerkOpen(true)}
             onAisleChange={s.setAisle}

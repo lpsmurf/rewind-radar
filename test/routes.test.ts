@@ -4,7 +4,8 @@ import { jsonReply, toolReply } from './helpers/anthropic.ts';
 import { LPSMURF, POSTIZ, stubGitHub } from './helpers/github.ts';
 import { GitHubError } from '../lib/github.ts';
 
-const { create, db, gh } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, gh: { real: false } }));
+const { create, db, gh, batch } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, gh: { real: false }, batch: { submit: vi.fn(), collect: vi.fn() } }));
+vi.mock('../lib/batchAssess.ts', () => ({ submitAssessBatch: batch.submit, collectAssessBatches: batch.collect }));
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 // The username check is tested in github.test.ts / identity.test.ts; here "ghost*" never exist and "outage*" hits a GitHub outage.
@@ -427,6 +428,34 @@ describe('POST radar/refresh', () => {
     expect(r.body).toMatchObject({ ok: true, stocked: 1 });
     const rows = d.calls('ai_usage').filter((q: Query) => has(q, 'insert'));
     expect(rows.map((q: Query) => (q.calls.find((c) => c[0] === 'insert')![1] as any).route)).toEqual(['radar']);
+  });
+});
+
+describe('POST radar/refresh batch pre-assessment', () => {
+  const stub = () => {
+    vi.stubEnv('CRON_SECRET', 's3cret');
+    const d = setup();
+    d.on('radar_runs', (q: Query) => (has(q, 'insert') ? { data: { id: 7 }, error: null } : { data: null, error: null }));
+    vi.stubGlobal('fetch', async (u: unknown) =>
+      String(u).includes('/search/repositories')
+        ? new Response(JSON.stringify({ items: [{ full_name: 'A/B', owner: { login: 'a' }, description: 'd', language: 'TS', stargazers_count: 5, html_url: 'https://github.com/A/B' }] }))
+        : new Response('readme'),
+    );
+    create.mockResolvedValue(toolReply('review_repo', { genre: 'Dev Workflow', blurb: 'b', ring: 'trial', rating: 4 }));
+  };
+  const refresh = () => handle(new Request('http://localhost/api/radar/refresh', { method: 'POST', headers: { 'x-cron-secret': 's3cret' } })).then(async (r) => ({ status: r.status, body: (await r.json()) as any }));
+  beforeEach(() => { batch.submit.mockReset().mockResolvedValue('msgbatch_1'); });
+
+  it('submits a batch for the repos it just stocked', async () => {
+    stub();
+    expect(await refresh()).toMatchObject({ status: 200, body: { ok: true, stocked: 1 } });
+    expect(batch.submit).toHaveBeenCalledWith(['a/b']);
+  });
+  it('does not fail the refresh when the batch cannot be submitted', async () => {
+    stub();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    batch.submit.mockRejectedValue(new Error('anthropic down'));
+    expect(await refresh()).toMatchObject({ status: 200, body: { ok: true, stocked: 1 } });
   });
 });
 

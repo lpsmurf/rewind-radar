@@ -6,8 +6,11 @@ import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
+import { collectAssessBatches, submitAssessBatch } from './batchAssess.ts';
+import { buildMonthlyPicks, previousMonth } from './monthly.ts';
 import { refreshRadar } from './radar.ts';
 import { isConfigKey, parseSourceConfig } from './sources/config.ts';
+import { snapshotStars } from './stars.ts';
 import { SOURCES } from './sources/index.ts';
 import { liveCtx, manualSource, runSources } from './sources/pipeline.ts';
 import { stockedTape } from './sources/stock.ts';
@@ -305,7 +308,7 @@ export async function handle(req: Request): Promise<Response> {
     if (!forced && hours < 60) return json({ ok: true, skipped: true, due_in_hours: Math.ceil(60 - hours) });
     const { data: run, error } = await db.from('radar_runs').insert({ stocked: 0 }).select('id').single();
     if (error || !run) return json({ error: 'Could not start refresh' }, 500);
-    const job = meter('radar', (onUsage) => refreshRadar(20, onUsage))
+    const job = meter('radar', (onUsage) => refreshRadar(20, onUsage, (repos) => submitAssessBatch(repos)))
       .then(async (n) => { await db.from('radar_runs').update({ stocked: n }).eq('id', run.id); return n; })
       .catch(async (e) => { console.error('[radar]', e); await db.from('radar_runs').delete().eq('id', run.id); throw e; });
     const rt = (globalThis as any).EdgeRuntime;
@@ -424,7 +427,8 @@ export async function handle(req: Request): Promise<Response> {
   if (path === 'sources/run' && req.method === 'POST') {
     const secret = env('CRON_SECRET');
     if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
-    const job = runSources(SOURCES, liveCtx());
+    // finished pre-assessment batches go into the cache first; best-effort (collectAssessBatches never throws)
+    const job = collectAssessBatches().catch((e) => console.warn('[batch]', e)).then(() => runSources(SOURCES, liveCtx()));
     const rt = (globalThis as any).EdgeRuntime;
     if (rt?.waitUntil) {
       rt.waitUntil(job.catch((e) => console.error('[sources]', e))); // keep working after we answer the cron call
@@ -435,6 +439,19 @@ export async function handle(req: Request): Promise<Response> {
     } catch (e) {
       console.error('[sources]', e);
       return json({ error: 'Source run failed' }, 500);
+    }
+  }
+
+  // --- monthly shelf: pg_cron calls this on the 1st; it builds last calendar month's picks (database only, no AI) ---
+  if (path === 'sources/monthly' && req.method === 'POST') {
+    const secret = env('CRON_SECRET');
+    if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const month = previousMonth();
+    try {
+      return json({ ok: true, month, picked: (await buildMonthlyPicks(month)).length });
+    } catch (e) {
+      console.error('[monthly]', e);
+      return json({ error: 'Monthly picks failed' }, 500);
     }
   }
 
@@ -481,6 +498,7 @@ export async function handle(req: Request): Promise<Response> {
         const tape = stockedTape(facts, review, { url: row.credit_url, title: row.credit_title });
         const ins = await db.from('tapes').insert(tape).select('id').single();
         if (ins.error && ins.error.code !== '23505') throw ins.error;
+        if (!ins.error) await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
         await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
         return ins.error ? json({ error: 'Already in the store' }, 409) : json({ ok: true, slug: tape.slug });
       } catch (e) {

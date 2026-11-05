@@ -7,6 +7,7 @@ import {
   type Point, type Room,
 } from './movement';
 import { activeBubble, bubbleLines, type ChatEntry } from './chat';
+import { MONTHLY_PLACEHOLDER } from './monthly';
 
 export interface StoreProps {
   tapes: Tape[];
@@ -17,6 +18,8 @@ export interface StoreProps {
   meKey: string;
   highlighted: Set<string>;
   top10: Tape[];
+  /** The most recent month's picks, best first (empty until the first picks are built on the 1st). */
+  monthly: Tape[];
   onTapeClick(t: Tape): void;
   onCounterClick(): void;
   onAisleChange(aisle: Aisle): void;
@@ -113,7 +116,7 @@ function buildStatic(): HTMLCanvasElement {
     g.fillStyle = P.yellowDark;
     g.fillRect(x, 42, w, 2); g.fillRect(x, 76, w, 3);
   };
-  wallShelf(6, 246); wallShelf(262, 90);
+  wallShelf(6, 128); wallShelf(140, 88); wallShelf(262, 90); // weekly new releases, monthly picks, community
   // genre shelf blocks
   for (let i = 0; i < 8; i++) {
     const x = bx(i), y = by(i);
@@ -202,9 +205,9 @@ export default function Store(props: StoreProps) {
       const hs: Hit[] = [];
       g.textBaseline = 'top';
 
-      const sign = (label: string, cx: number, y: number, pulse: boolean) => {
-        g.font = FONT;
-        const w = label.length * 8 + 6;
+      const sign = (label: string, cx: number, y: number, pulse: boolean, small = false) => {
+        g.font = small ? FONT_S : FONT;
+        const w = label.length * (small ? 6 : 8) + 6;
         g.fillStyle = pulse && blink ? P.cream : P.yellow;
         g.fillRect(Math.round(cx - w / 2), y, w, 11);
         g.fillStyle = P.yellowDark; g.fillRect(Math.round(cx - w / 2), y + 10, w, 1);
@@ -251,10 +254,10 @@ export default function Store(props: StoreProps) {
         for (const t of p.tapes) (by_[aisleOf(t)] ||= []).push(t);
 
         // face-out wall boxes
-        const faceOut = (list: Tape[], x0: number, perRow: number, aisle: Aisle) => {
+        const faceOut = (list: Tape[], x0: number, perRow: number, aisle: Aisle, pitch = 16) => {
           let any = false;
           list.slice(0, perRow * 2).forEach((t, i) => {
-            const x = x0 + (i % perRow) * 16, y = i < perRow ? 22 : 56;
+            const x = x0 + (i % perRow) * pitch, y = i < perRow ? 22 : 56;
             g.fillStyle = coverColor(t); g.fillRect(x, y, 14, 20);
             g.fillStyle = 'rgba(255,255,255,.25)'; g.fillRect(x + 1, y + 1, 12, 2);
             g.fillStyle = P.cream; g.fillRect(x + 2, y + 6, 10, 6);
@@ -265,10 +268,17 @@ export default function Store(props: StoreProps) {
           });
           return any;
         };
-        const hlNew = faceOut(by_['new'] ?? [], 10, 15, 'new') || (by_['new'] ?? []).some((t) => hl.has(t.id));
+        const hlNew = faceOut(by_['new'] ?? [], 10, 8, 'new', 15) || (by_['new'] ?? []).some((t) => hl.has(t.id));
         const hlCom = faceOut(by_['community'] ?? [], 266, 5, 'community') || (by_['community'] ?? []).some((t) => hl.has(t.id));
-        sign('NEW RELEASES', 130, 5, hlNew);
-        sign('COMMUNITY PICKS', 305, 5, hlCom);
+        // monthly picks: the most recent month's top 10 (a tape here is a different object from the New Releases one, so match by id)
+        const hlMon = faceOut(p.monthly, 144, 5, 'new') || p.monthly.some((t) => hl.has(t.id));
+        if (!p.monthly.length) {
+          g.font = FONT_S; g.fillStyle = P.cream;
+          MONTHLY_PLACEHOLDER.forEach((line, i) => g.fillText(line, 144 + Math.round((80 - line.length * 6) / 2), 34 + i * 12));
+        }
+        sign('WEEKLY NEW RELEASES', 70, 5, hlNew, true);
+        sign('MONTHLY PICKS', 184, 5, hlMon, true);
+        sign('COMMUNITY PICKS', 307, 5, hlCom, true);
         sign('ARCADE →', DOOR.x + DOOR.w / 2, DOOR.y - 14, true);
 
         // genre aisles

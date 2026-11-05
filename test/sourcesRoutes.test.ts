@@ -3,7 +3,8 @@ import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { toolReply } from './helpers/anthropic.ts';
 import { POSTIZ, stubGitHub } from './helpers/github.ts';
 
-const { create, db, reg } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, reg: { sources: [] as any[] } }));
+const { create, db, reg, batch } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, reg: { sources: [] as any[] }, batch: { submit: vi.fn(), collect: vi.fn(), order: [] as string[] } }));
+vi.mock('../lib/batchAssess.ts', () => ({ submitAssessBatch: batch.submit, collectAssessBatches: batch.collect }));
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 vi.mock('../lib/sources/index.ts', () => ({ SOURCES: reg.sources }));
@@ -43,6 +44,7 @@ beforeEach(() => {
   create.mockReset();
   create.mockResolvedValue(null);
   reg.sources.length = 0;
+  batch.collect.mockReset().mockResolvedValue({ batches: 0, cached: 0, skipped: 0 });
   vi.stubEnv('ADMIN_TOKEN', 'open-sesame');
   vi.stubEnv('CRON_SECRET', 's3cret');
 });
@@ -122,6 +124,14 @@ describe('POST /admin/queue/:id/approve', () => {
     ]);
     expect(writes(d, 'ai_usage', 'insert').map((x: any) => x.route)).toEqual(['admin']);
     expect(writes(d, 'ingest_queue', 'update')).toEqual([expect.objectContaining({ status: 'stocked', decided_at: expect.any(String) })]);
+  });
+  it('snapshots the stars of a stocked repo, and none for one that was already in the store', async () => {
+    const d = setup();
+    await call('POST', 'admin/queue/7/approve');
+    expect(writes(d, 'star_snapshots', 'upsert')).toEqual([[expect.objectContaining({ repo: 'gitroomhq/postiz-app', stars: expect.any(Number), at: new Date().toISOString().slice(0, 10) })]]);
+    const d2 = setup({ tapeInsert: { code: '23505' } });
+    await call('POST', 'admin/queue/7/approve');
+    expect(writes(d2, 'star_snapshots', 'upsert')).toHaveLength(0);
   });
   it('404s an unknown id and 400s a bad one', async () => {
     setup({ row: null });
@@ -317,6 +327,15 @@ describe('POST /sources/run', () => {
     vi.stubEnv('CRON_SECRET', '');
     expect((await run('')).status).toBe(403);
     expect(d.queries).toHaveLength(0);
+  });
+  it('collects pending assessment batches before it runs the sources, and a collect failure does not stop the run', async () => {
+    batch.order.length = 0;
+    batch.collect.mockReset().mockImplementation(async () => { batch.order.push('collect'); throw new Error('anthropic down'); });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    reg.sources.push({ name: 'web', run: async () => { batch.order.push('source'); return []; } });
+    setup();
+    expect((await run('s3cret')).status).toBe(200);
+    expect(batch.order).toEqual(['collect', 'source']);
   });
   it('runs every registered source and returns the summary', async () => {
     stubGitHub(POSTIZ);
