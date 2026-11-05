@@ -171,8 +171,9 @@ const fromRow = (row: Row, stale = false): AssessmentResult => ({
 
 /**
  * Cached for ASSESS_TTL_DAYS. A miss costs one GitHub read and one Sonnet call, so it must pass `allowMiss`
- * (rate limit) and the daily budget; if either fails, or the refresh breaks, an old row is served as stale.
- * null = GitHub has no such repo.
+ * (per-IP limit), the database hourly/assess-budget caps and the daily budget; if any of them says no, or the
+ * refresh breaks, an old row is served as stale (RateLimitError/BudgetError only when there is no row).
+ * null = GitHub has no such repo. A bare owner/repo is verified to exist first.
  */
 export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean }): Promise<AssessmentResult | null> {
   const key = ref.full.toLowerCase();
@@ -196,12 +197,20 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     if (!tapeErr && !tape && !(await repoExists(ref))) return null;
   }
 
-  if (!o.allowMiss()) throw new RateLimitError();
+  if (!o.allowMiss()) {
+    if (row) return fromRow(row, true);
+    throw new RateLimitError();
+  }
   if (!(await budgetLeft({ failClosed: true }))) {
     if (row) return fromRow(row, true);
     throw new BudgetError();
   }
-  await checkAssessLimits();
+  try {
+    await checkAssessLimits();
+  } catch (e) {
+    if (row) return fromRow(row, true);
+    throw e;
+  }
 
   try {
     const facts = await fetchRepoFacts(ref);

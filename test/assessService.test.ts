@@ -256,3 +256,30 @@ describe('bare owner/repo guesses', () => {
     await expect(repoExists(bareP)).rejects.toMatchObject({ status: 403 });
   });
 });
+
+describe('expired row + rate limit', () => {
+  it('serves the stale row when allowMiss says no', async () => {
+    setup(row({ updated_at: daysAgo(8) }));
+    const r = await getAssessment(ref, { allowMiss: () => false });
+    expect(r).toMatchObject({ cached: true, stale: true });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('serves the stale row when the database hourly cap is hit', async () => {
+    vi.stubEnv('AI_ASSESS_MAX_PER_HOUR', '1');
+    setup(row({ prompt_version: PROMPT_VERSION - 1 }), 0, [{ at: new Date().toISOString(), cost_usd: 0.01 }]);
+    expect(await getAssessment(ref, allow)).toMatchObject({ cached: true, stale: true });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('serves the stale row when the assess budget is spent', async () => {
+    vi.stubEnv('AI_ASSESS_BUDGET_USD', '0.1');
+    setup(row({ updated_at: daysAgo(8) }), 0, [{ at: new Date().toISOString(), cost_usd: 0.5 }]);
+    expect(await getAssessment(ref, allow)).toMatchObject({ stale: true });
+  });
+
+  it('still throws RateLimitError when there is no row at all', async () => {
+    setup(null);
+    await expect(getAssessment(ref, { allowMiss: () => false })).rejects.toBeInstanceOf(RateLimitError);
+  });
+});
