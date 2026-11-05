@@ -3,6 +3,7 @@ import { clerk, recommendForProfile, reviewProposal, reviewSubmission, SONNET, t
 import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
+import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
 import { refreshRadar } from './radar.ts';
 import { env } from './env.ts';
@@ -49,6 +50,16 @@ function clientKey(req: Request): string {
   return (hops[hops.length - 1] ?? 'anon').slice(0, 64);
 }
 
+/**
+ * Clerk limits per hour. Light = a verified GitHub username; member = signed in with GitHub.
+ * Each visitor has an identity bucket and an IP bucket; both must have room. Members get a higher IP allowance
+ * (60 questions, 10 assessments) so a shared NAT does not block them.
+ */
+const CLERK_LIMITS = {
+  light: { ask: 15, assess: 5, ipAsk: 15, ipAssess: 5 },
+  member: { ask: 40, assess: 10, ipAsk: 60, ipAssess: 10 },
+} as const;
+
 /** Run an AI call, collect its usage, and record it (even if the call throws). */
 async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): Promise<T> {
   const used: [string, Parameters<OnUsage>[1]][] = [];
@@ -79,14 +90,20 @@ export async function handle(req: Request): Promise<Response> {
 
   // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
+    const id = await whoIs(req, body);
+    if (id.tier === 'guest') return json({ error: id.unknown ? CLERK_LINES.gateUnknown : CLERK_LINES.gate, gate: 'github' }, 401);
+    const lim = CLERK_LIMITS[id.tier];
+    const idKey = id.tier === 'member' ? `m:${id.userId}` : `gh:${id.github.toLowerCase()}`;
     const q = classifyQuestion(String(body.question ?? ''));
     const plain = { slugs: [] as string[], aisle: 'counter' };
     if (q.kind === 'junk') return json({ answer: q.reply, ...plain });
-    if (limited('clerk:' + who, 15)) return json({ error: 'The clerk needs a break. Try again later.' }, 429);
+    if (limited('clerk:' + who, lim.ipAsk) || limited(`clerk:${idKey}`, lim.ask)) return json({ error: 'The clerk needs a break. Try again later.' }, 429);
 
     if (q.kind === 'repo') {
       try {
-        const got = await getAssessment(q.ref, { allowMiss: (dry) => !limited('assess:' + who, 5, dry) });
+        const got = await getAssessment(q.ref, {
+          allowMiss: (dry) => !(limited('assess:' + who, lim.ipAssess, dry) || limited(`assess:${idKey}`, lim.assess, dry)),
+        });
         if (got) {
           const { owner, repo } = q.ref;
           const { data: tape } = await admin()
@@ -96,7 +113,7 @@ export async function handle(req: Request): Promise<Response> {
             .in('slug', [`gh-${owner}-${repo}`, `c-${owner}-${repo}`].map((x) => x.toLowerCase()))
             .limit(1)
             .maybeSingle();
-          const fit = typeof body.github === 'string' ? await personalFit(got.assessment, got.repo.full_name, body.github) : null;
+          const fit = await personalFit(got.assessment, got.repo.full_name, id.github);
           return json({
             answer: got.assessment.plain,
             slugs: [...(tape ? [tape.slug] : []), ...got.assessment.overlaps.map((o) => o.slug)],
