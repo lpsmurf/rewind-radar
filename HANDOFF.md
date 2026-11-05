@@ -58,6 +58,20 @@ A final Sonnet review of the diff led to six more fixes, also test-first: the `c
 5. Deploy (`npm run deploy:api`, `npm run deploy:site`) **only when Luis says so**. Afterwards, check which IP header Supabase sets (finding 2).
 - **Optional:** add `scripts/eval-clerk.ts`, about 30 labelled on/off-topic questions run against the real API. It costs cents and needs Luis's OK. Use it before switching `ASSESS_MODEL` to Haiku.
 
+### Clerk gate: branch `feat/clerk-gate`, PR stacked on PR #1 (Luis's request, 2026-11-05)
+- **Rule:** only visitors who give a GitHub username or sign in with GitHub may use the clerk. Guests get 401 and a gate panel.
+- **Tiers:**
+  - **Light:** a GitHub username the server checks exists. The check is cached: hits 1 h, misses 10 min, in-flight checks shared. New lookups are limited per IP (`GATE_LOOKUPS_PER_HOUR`, default 20). If GitHub can't be reached for an uncached name, the request is refused with 503. Light identities are unverified, so only the IP bucket really binds them: 15 questions and 5 assessments an hour.
+  - **Member:** signed in with Supabase Auth, GitHub provider. The `Bearer` token is verified with `auth.getUser`. The login comes from the GitHub identity's `identity_data`, never from the user-editable `user_metadata`. Limits: 40 questions and 10 assessments an hour per member.
+- **Global ceiling:** `CLERK_MAX_PER_HOUR` (default 300) per Edge isolate. Over it, the clerk answers in search-only mode.
+- **No migration needed.**
+- **Luis, to switch on sign-in (tier 2):**
+  1. In GitHub, go to Settings → Developer settings → OAuth Apps → New. Homepage: `https://lpsmurf.github.io/rewind-radar/`. Callback: `https://onovfynfxuemvsrdetez.supabase.co/auth/v1/callback`.
+  2. In Supabase, go to Authentication → Providers → GitHub. Enable it, then paste the Client ID and Secret.
+  3. In Authentication → URL Configuration, add `https://lpsmurf.github.io/rewind-radar/` and `http://localhost:5173/**` to the redirect allow-list.
+  4. Build the site with `VITE_GITHUB_SIGNIN=1`, then deploy the API and the site when you say so.
+- **Not tested in a real browser:** the OAuth redirect and the session being restored after it.
+
 ### Phase 2 findings (already diagnosed, not started)
 - Other visitors don't move because presence shares only an aisle name (`setAisle` in `src/lib/useStore.ts`). Remote characters are drawn at fixed `anchorOf(aisle)` spots (`src/store/Store.tsx` ~L230).
 - Same-browser tabs share the `rr_visitor` id, so they merge into one presence entry and hide as "me".

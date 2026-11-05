@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { fetchProfile, fetchRepoFacts, GitHubError, parseRepoRef } from '../lib/github.ts';
+import { fetchProfile, fetchRepoFacts, githubUserExists, GitHubError, parseRepoRef } from '../lib/github.ts';
 import { LPSMURF, POSTIZ, stubGitHub } from './helpers/github.ts';
 
 const ref = parseRepoRef('https://github.com/gitroomhq/postiz-app')!;
@@ -61,5 +61,54 @@ describe('fetchProfile (existing behaviour)', () => {
     const p = await fetchProfile('https://github.com/lpsmurf');
     expect(p).toMatchObject({ kind: 'user', name: 'lpsmurf' });
     expect(p!.text).toContain('rewind-radar');
+  });
+});
+
+describe('githubUserExists', () => {
+  it('is true for a user, false for a 404, and throws GitHubError on 403/5xx', async () => {
+    stubGitHub({ '/users/lpsmurf': 200, '/users/limited': 403, '/users/down': 502 });
+    expect(await githubUserExists('lpsmurf')).toBe(true);
+    expect(await githubUserExists('ghost')).toBe(false);
+    await expect(githubUserExists('limited')).rejects.toBeInstanceOf(GitHubError);
+    await expect(githubUserExists('down')).rejects.toBeInstanceOf(GitHubError);
+  });
+
+  it('caches hits for an hour and misses for ten minutes; errors are not cached', async () => {
+    vi.useFakeTimers();
+    try {
+      const seen = stubGitHub({ '/users/lpsmurf': 200, '/users/flaky': 500 });
+      await githubUserExists('lpsmurf');
+      await githubUserExists('LPSmurf'); // same key, any case
+      await githubUserExists('ghost');
+      await githubUserExists('ghost');
+      expect(seen).toHaveLength(2);
+      vi.advanceTimersByTime(11 * 60_000);
+      await githubUserExists('lpsmurf');
+      await githubUserExists('ghost');
+      expect(seen.map((s) => s.url.split('/').pop())).toEqual(['lpsmurf', 'ghost', 'ghost']);
+      vi.advanceTimersByTime(60 * 60_000);
+      await githubUserExists('lpsmurf');
+      expect(seen).toHaveLength(4);
+      await expect(githubUserExists('flaky')).rejects.toThrow();
+      await expect(githubUserExists('flaky')).rejects.toThrow();
+      expect(seen.filter((s) => s.url.endsWith('/flaky'))).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares one GitHub call between concurrent checks of the same login', async () => {
+    const seen = stubGitHub({ '/users/lpsmurf': 200 });
+    const rs = await Promise.all([githubUserExists('lpsmurf'), githubUserExists('LPSmurf'), githubUserExists('lpsmurf')]);
+    expect(rs).toEqual([true, true, true]);
+    expect(seen).toHaveLength(1);
+  });
+
+  it('forgets a failed in-flight check so the next one retries', async () => {
+    const seen = stubGitHub({ '/users/flaky': 500 });
+    await Promise.allSettled([githubUserExists('flaky'), githubUserExists('flaky')]);
+    expect(seen).toHaveLength(1);
+    await expect(githubUserExists('flaky')).rejects.toThrow();
+    expect(seen).toHaveLength(2);
   });
 });

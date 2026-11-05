@@ -3,6 +3,7 @@ import { clerk, recommendForProfile, reviewProposal, reviewSubmission, SONNET, t
 import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
+import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
 import { refreshRadar } from './radar.ts';
 import { env } from './env.ts';
@@ -49,6 +50,20 @@ function clientKey(req: Request): string {
   return (hops[hops.length - 1] ?? 'anon').slice(0, 64);
 }
 
+/**
+ * Clerk limits per hour. Light = a verified GitHub username; member = signed in with GitHub.
+ * Each visitor has an identity bucket and an IP bucket; both must have room. Members get a higher IP allowance
+ * (60 questions, 10 assessments) so a shared NAT does not block them.
+ */
+// Light identities are unverified (anyone can type any real username), so only the IP bucket really binds them;
+// CLERK_MAX_PER_HOUR is a per-isolate ceiling on every clerk Anthropic call, whoever asks.
+const clerkCeiling = (dry = false) => limited('ceiling:clerk', Number(env('CLERK_MAX_PER_HOUR') || '300'), dry);
+
+const CLERK_LIMITS = {
+  light: { ask: 15, assess: 5, ipAsk: 15, ipAssess: 5 },
+  member: { ask: 40, assess: 10, ipAsk: 60, ipAssess: 10 },
+} as const;
+
 /** Run an AI call, collect its usage, and record it (even if the call throws). */
 async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): Promise<T> {
   const used: [string, Parameters<OnUsage>[1]][] = [];
@@ -79,14 +94,21 @@ export async function handle(req: Request): Promise<Response> {
 
   // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
+    const id = await whoIs(req, body, { allowLookup: (dry) => !limited('lookup:' + who, Number(env('GATE_LOOKUPS_PER_HOUR') || '20'), dry) });
+    if (id.tier === 'busy') return json({ error: id.why === 'limit' ? CLERK_LINES.gateLookups : CLERK_LINES.gateBusy }, id.why === 'limit' ? 429 : 503);
+    if (id.tier === 'guest') return json({ error: id.unknown ? CLERK_LINES.gateUnknown : CLERK_LINES.gate, gate: 'github' }, 401);
+    const lim = CLERK_LIMITS[id.tier];
+    const idKey = id.tier === 'member' ? `m:${id.userId}` : `gh:${id.github.toLowerCase()}`;
     const q = classifyQuestion(String(body.question ?? ''));
     const plain = { slugs: [] as string[], aisle: 'counter' };
     if (q.kind === 'junk') return json({ answer: q.reply, ...plain });
-    if (limited('clerk:' + who, 15)) return json({ error: 'The clerk needs a break. Try again later.' }, 429);
+    if (limited('clerk:' + who, lim.ipAsk) || limited(`clerk:${idKey}`, lim.ask)) return json({ error: 'The clerk needs a break. Try again later.' }, 429);
 
     if (q.kind === 'repo') {
       try {
-        const got = await getAssessment(q.ref, { allowMiss: (dry) => !limited('assess:' + who, 5, dry) });
+        const got = await getAssessment(q.ref, {
+          allowMiss: (dry) => !(clerkCeiling(dry) || limited('assess:' + who, lim.ipAssess, dry) || limited(`assess:${idKey}`, lim.assess, dry)),
+        });
         if (got) {
           const { owner, repo } = q.ref;
           const { data: tape } = await admin()
@@ -96,7 +118,7 @@ export async function handle(req: Request): Promise<Response> {
             .in('slug', [`gh-${owner}-${repo}`, `c-${owner}-${repo}`].map((x) => x.toLowerCase()))
             .limit(1)
             .maybeSingle();
-          const fit = typeof body.github === 'string' ? await personalFit(got.assessment, got.repo.full_name, body.github) : null;
+          const fit = await personalFit(got.assessment, got.repo.full_name, id.github);
           return json({
             answer: got.assessment.plain,
             slugs: [...(tape ? [tape.slug] : []), ...got.assessment.overlaps.map((o) => o.slug)],
@@ -129,7 +151,7 @@ export async function handle(req: Request): Promise<Response> {
     const text = q.kind === 'ask' ? q.text : String(body.question ?? '').trim();
     try {
       const rows = await candidates(text, 30);
-      if (!(await budgetLeft())) {
+      if (!(await budgetLeft()) || clerkCeiling()) {
         // free mode: no AI, just the best text matches
         const hits = rows.filter((r) => r.match).slice(0, 5);
         if (!hits.length) return json({ answer: CLERK_LINES.freeNone, ...plain });
