@@ -6,6 +6,7 @@ import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
+import { buildMonthlyPicks, previousMonth } from './monthly.ts';
 import { refreshRadar } from './radar.ts';
 import { snapshotStars } from './stars.ts';
 import { SOURCES } from './sources/index.ts';
@@ -435,6 +436,19 @@ export async function handle(req: Request): Promise<Response> {
     } catch (e) {
       console.error('[sources]', e);
       return json({ error: 'Source run failed' }, 500);
+    }
+  }
+
+  // --- monthly shelf: pg_cron calls this on the 1st; it builds last calendar month's picks (database only, no AI) ---
+  if (path === 'sources/monthly' && req.method === 'POST') {
+    const secret = env('CRON_SECRET');
+    if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const month = previousMonth();
+    try {
+      return json({ ok: true, month, picked: (await buildMonthlyPicks(month)).length });
+    } catch (e) {
+      console.error('[monthly]', e);
+      return json({ error: 'Monthly picks failed' }, 500);
     }
   }
 
