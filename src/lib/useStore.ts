@@ -9,6 +9,7 @@ import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } 
 import { createSendGate } from '../store/movement';
 import { acceptMove, rememberPos } from '../store/remote';
 import { backoffMs, createTrackGate, handleChannelStatus, visitorsFromPresence, type PresencePayload } from '../store/presence';
+import { joinPicks, latestPicks, type PickRow } from '../store/monthly';
 import { deletedId, mergeChat, removeChat, type ChatEntry, type ChatMsg } from '../store/chat';
 
 const CHAT_COLS = 'id,at,sender_key,login,tier,body';
@@ -38,6 +39,7 @@ export function useStore() {
   const [aisle, setAisleState] = useState<Aisle>('entrance');
   const [tapes, setTapes] = useState<Tape[]>(sb ? [] : MOCK_TAPES);
   const [visitors, setVisitors] = useState<Visitor[]>([]);
+  const [monthly, setMonthly] = useState<Tape[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [chat, setChat] = useState<ChatEntry[]>([]);
   const backedRef = useRef<Set<string>>(new Set());
@@ -92,6 +94,20 @@ export function useStore() {
       if (dead) return;
       const vm = new Map<string, number>((vr.data ?? []).map((r: any) => [r.tape_id, r.votes]));
       setTapes(((tr.data ?? []) as any[]).map((t) => ({ ...t, votes: vm.get(t.id) ?? 0 }) as Tape));
+      // Monthly Picks: the latest month in monthly_picks, joined to its tapes by slug (retired tapes are not in the 500 above)
+      try {
+        const mr = await c.from('monthly_picks').select('month,rank,tape_slug').order('month', { ascending: false }).order('rank', { ascending: true }).limit(20);
+        const picks = latestPicks((mr.data ?? []) as PickRow[]);
+        if (picks.length) {
+          const tr2 = await c.from('tapes').select(COLS).in('slug', picks.map((p) => p.tape_slug));
+          const ids = ((tr2.data ?? []) as any[]).map((t) => t.id);
+          const vr2 = ids.length ? await c.from('tape_votes').select('tape_id,votes').in('tape_id', ids) : { data: [] };
+          const vm2 = new Map<string, number>(((vr2.data ?? []) as any[]).map((r) => [r.tape_id, r.votes]));
+          if (!dead) setMonthly(joinPicks(picks, (tr2.data ?? []) as any[], vm2));
+        }
+      } catch {
+        /* the shelf just shows its placeholder */
+      }
       const pr = await c.from('proposals').select('id,kind,title,pitch,link,submitter,genre,votes,created_at').order('votes', { ascending: false }).order('created_at', { ascending: false }).limit(100);
       if (!dead) setProposals((pr.data ?? []) as Proposal[]);
       // last 50 visible messages (RLS hides day-old rows); seen = 0 so history never pops a bubble
@@ -451,5 +467,5 @@ export function useStore() {
     [tapes],
   );
 
-  return { tapes, top10, visitors, me, setAisle, move, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, connectGithub, memberLogin: member?.login ?? null, member, canSignIn: canSignIn(import.meta.env.VITE_GITHUB_SIGNIN, !!sb), signIn, signOut, proposals, propose, backProposal, chat, meKey: keyRef.current, sendChat, reportChat, highlighted, toast, live };
+  return { tapes, top10, monthly, visitors, me, setAisle, move, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, connectGithub, memberLogin: member?.login ?? null, member, canSignIn: canSignIn(import.meta.env.VITE_GITHUB_SIGNIN, !!sb), signIn, signOut, proposals, propose, backProposal, chat, meKey: keyRef.current, sendChat, reportChat, highlighted, toast, live };
 }
