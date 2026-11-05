@@ -92,7 +92,19 @@ A final Sonnet review of the diff led to six more fixes, also test-first: the `c
 - **Migration `004_chat.sql`** (written, not applied): `chat_messages` (public SELECT on the last 24 h only), the server-only tables `chat_senders` and `chat_reports`, `report_chat` and `chat_spend_today` (service_role only), the Realtime publication, and an hourly pg_cron cleanup.
   - Tested on a throwaway local Postgres 17 container: it applies, it re-runs idempotently, the report logic works, and anon is denied on writes, sender ids and the RPC.
   - Not tested: the pg_cron and Realtime parts, since the container has neither.
-- **Tests:** 342. tsc, build, sync-edge and `deno check` pass.
+- **Tests:** 358. tsc, build, sync-edge and `deno check` pass.
+- **Browser-verified (2026-11-05):** headless Chromium with separate browser contexts, against a local Supabase stack in Docker. GitHub and Anthropic were mocked; nothing touched production. All 10 scenarios pass:
+  - presence, walking, and two tabs as two people;
+  - the arcade, seen by others;
+  - the guest gate;
+  - chat bubbles and BADWORD rejection;
+  - removal after 3 reports in both windows;
+  - the clerk;
+  - a stress run of 8+ aisles and arcade trips in under 30 s with no presence rate limit;
+  - forced socket closes reconnecting in about 1 s.
+
+  Three bugs found this way are fixed: the stale presence meta, the presence rate limit closing the channel, and reconnect recursion.
+- **Not browser-tested:** real GitHub OAuth, real Haiku moderation, shelves with real tapes, and mobile.
 - **Known trade-off:** any `word.word` token counts as a link, so "node.js" or "next.js" in a message is refused.
 - **Luis, in this order (after Phase 1 and the gate are live):**
   1. Apply `supabase/migrations/004_chat.sql`.
