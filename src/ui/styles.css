@@ -74,3 +74,38 @@ textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; r
 .bigqr h2 { line-height: 1.5; padding: 0 28px; font-size: clamp(11px, 2.2vw, 22px); color: #ffd200; margin: 0; letter-spacing: 1px; }
 .bigqr .url { font-size: clamp(10px, 1.8vw, 16px); margin: 0; word-break: break-all; color: #fff6d5; }
 .bigqr .count { font-size: clamp(10px, 1.6vw, 14px); margin: 0; color: #3ddc84; }
+
+/* Clerk repo assessment card (inside the drawer log) */
+.ghnote { margin: 0 0 8px; }
+.linkbtn { font: inherit; font-size: 8px; background: none; border: 0; padding: 0; color: #ffd200; text-decoration: underline; cursor: pointer; }
+.acard { margin: 6px 0; padding: 8px; border: 3px solid #ffd200; background: #061846; font-size: 8px; line-height: 1.6; min-width: 0; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; }
+.acard p { margin: 6px 0; }
+.acard ul, .acard ol { margin: 6px 0; padding-left: 16px; }
+.acard li { margin: 3px 0; }
+.acard .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.acard .ring { padding: 4px 7px; border: 3px solid #0a0a14; color: #0a0a14; font-size: 8px; transform: rotate(-4deg); }
+.acard .conf, .acard .effort { font-size: 8px; color: #fff6d5; }
+.acard .effort { margin-left: auto; padding: 3px 5px; border: 3px solid #1f4fbf; background: #0b2a6f; }
+.acard .name { display: block; margin: 6px 0 0; font-size: 9px; color: #ffd200; }
+.acard .plain { font-size: 9px; }
+.acard .facts { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0; color: #fff6d5; }
+.acard .archived { background: #e63946; color: #fff; padding: 1px 5px; border: 2px solid #0a0a14; }
+.acard .pros { display: grid; gap: 2px; }
+.acard .plus, .acard .minus { list-style: none; padding-left: 0; }
+.acard .plus li::before { content: '+ '; color: #3ddc84; }
+.acard .minus li::before { content: '\2212  '; color: #ff4d4d; }
+.acard .gates { list-style: none; border-top: 2px dashed #1f4fbf; border-bottom: 2px dashed #1f4fbf; padding: 4px 0; }
+.acard .gates li { display: flex; gap: 6px; align-items: flex-start; }
+.acard .gates li i { font-style: normal; flex: none; width: 10px; }
+.acard .gates li.ok i { color: #3ddc84; }
+.acard .gates li.no i { color: #ff4d4d; }
+.acard .gates li.no b { color: #ff4d4d; }
+.acard .sub { margin: 8px 0 4px; color: #ffd200; font-size: 8px; }
+.acard .chips { margin-bottom: 4px; }
+.acard .fit { margin: 8px 0; padding: 6px; border: 3px solid #3ddc84; background: #0b2a6f; }
+.acard .fit .sub { margin-top: 0; color: #3ddc84; }
+.acard details { margin: 6px 0; border: 2px dashed #1f4fbf; padding: 4px 6px; }
+.acard summary { cursor: pointer; color: #ffd200; }
+.acard .warn { color: #ff4d4d; }
+.acard .foot { opacity: 0.7; }
+.acard .btn.full { margin: 6px 0 0; font-size: 8px; white-space: normal; }

@@ -90,3 +90,97 @@ export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'rep
     text: `USER ${user.login}${user.name ? ` (${user.name})` : ''}\nbio: ${user.bio ?? ''}\npublic repos: ${user.public_repos}\n\nRecently active repos:\n${lines.join('\n')}`,
   };
 }
+
+// ---------- repo assessment ----------
+export interface RepoRef { owner: string; repo: string; full: string; bare: boolean }
+
+// github.com paths that are not owner/repo.
+const RESERVED_OWNERS = new Set(
+  ('orgs topics marketplace sponsors features settings explore trending collections about pricing login join apps notifications ' +
+    'search enterprise site events codespaces new organizations users pulls issues security readme customer-stories').split(' '),
+);
+
+/** Find a GitHub repo in free text: a github.com URL anywhere, or the whole text being `owner/repo` (bare, a guess). */
+export function parseRepoRef(text: string): RepoRef | null {
+  const re = /(?<![\w.-])(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)/gi;
+  for (const m of text.matchAll(re)) {
+    const repo = m[2].replace(/\.git$/i, '').replace(/\.+$/, '');
+    if (!repo || RESERVED_OWNERS.has(m[1].toLowerCase())) continue;
+    return { owner: m[1], repo, full: `${m[1]}/${repo}`, bare: false };
+  }
+  const b = text.trim().match(/^@?([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})$/);
+  return b ? { owner: b[1], repo: b[2], full: `${b[1]}/${b[2]}`, bare: true } : null;
+}
+
+export class GitHubError extends Error {
+  constructor(public status: number) {
+    super(`GitHub responded ${status}`);
+  }
+}
+
+export interface RepoFacts {
+  full_name: string;
+  html_url: string;
+  description: string | null;
+  stars: number;
+  forks: number;
+  license: string | null;
+  language: string | null;
+  topics: string[];
+  pushed_at: string;
+  created_at: string;
+  archived: boolean;
+  open_issues: number;
+  /** top-level names; directories end in "/" */
+  contents: string[];
+  readme: string;
+}
+
+async function rawReadme(full: string): Promise<string> {
+  try {
+    const r = await fetch(`https://api.github.com/repos/${full}/readme`, { headers: headers(true) });
+    return r.ok ? (await r.text()).slice(0, 14000) : '';
+  } catch {
+    return '';
+  }
+}
+
+async function topLevel(full: string): Promise<string[]> {
+  try {
+    const r = await fetch(`https://api.github.com/repos/${full}/contents`, { headers: headers() });
+    if (!r.ok) return [];
+    const j: any = await r.json();
+    return Array.isArray(j) ? j.map((f) => `${f.name}${f.type === 'dir' ? '/' : ''}`) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Facts the assessment is built on. null = no such repo; throws GitHubError when GitHub refuses (e.g. rate limit). */
+export async function fetchRepoFacts(ref: RepoRef): Promise<RepoFacts | null> {
+  const path = `${ref.owner}/${ref.repo}`;
+  const [r, readme, contents] = await Promise.all([
+    fetch(`https://api.github.com/repos/${path}`, { headers: headers() }),
+    rawReadme(path),
+    topLevel(path),
+  ]);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new GitHubError(r.status);
+  const j: any = await r.json();
+  return {
+    full_name: j.full_name,
+    html_url: j.html_url,
+    description: j.description ?? null,
+    stars: j.stargazers_count ?? 0,
+    forks: j.forks_count ?? 0,
+    license: j.license?.spdx_id ?? null,
+    language: j.language ?? null,
+    topics: Array.isArray(j.topics) ? j.topics : [],
+    pushed_at: j.pushed_at,
+    created_at: j.created_at,
+    archived: !!j.archived,
+    open_issues: j.open_issues_count ?? 0,
+    contents,
+    readme,
+  };
+}

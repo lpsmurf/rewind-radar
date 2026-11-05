@@ -24,6 +24,8 @@
     "src",
     "lib",
     "scripts",
-    "vite.config.mts"
+    "test",
+    "vite.config.mts",
+    "vitest.config.mts"
   ]
 }

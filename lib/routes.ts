@@ -1,8 +1,12 @@
 import { admin } from './admin.ts';
-import { clerk, recommendForProfile, reviewProposal, reviewSubmission } from './ai.ts';
-import { fetchProfile, fetchRepo } from './github.ts';
+import { clerk, recommendForProfile, reviewProposal, reviewSubmission, type OnUsage } from './ai.ts';
+import { BudgetError, budgetLeft, getAssessment, personalFit, RateLimitError, recordUsage } from './assess.ts';
+import { candidates } from './catalog.ts';
+import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
+import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
 import { refreshRadar } from './radar.ts';
 import { env } from './env.ts';
+import { aisleOf } from '../src/types.ts';
 
 const CORS: Record<string, string> = {
   'access-control-allow-origin': '*',
@@ -32,15 +36,68 @@ export async function handle(req: Request): Promise<Response> {
   const body = req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
   const who = String(body.visitorId ?? ip);
 
-  // --- Claude clerk ---
+  // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
-    const question = String(body.question ?? '').trim();
-    if (question.length < 1 || question.length > 300) return json({ error: 'Question must be 1-300 characters' }, 400);
+    const q = classifyQuestion(String(body.question ?? ''));
+    const plain = { slugs: [] as string[], aisle: 'counter' };
+    if (q.kind === 'junk') return json({ answer: q.reply, ...plain });
     if (limited('clerk:' + who, 15)) return json({ error: 'The clerk needs a break. Try again later.' }, 429);
+
+    if (q.kind === 'repo') {
+      try {
+        const got = await getAssessment(q.ref, { allowMiss: () => !limited('assess:' + who, 5) && !limited('assess:all', 60) });
+        if (got) {
+          const { owner, repo } = q.ref;
+          const { data: tape } = await admin()
+            .from('tapes')
+            .select('slug,kind,genre')
+            .eq('archived', false)
+            .in('slug', [`gh-${owner}-${repo}`, `c-${owner}-${repo}`].map((x) => x.toLowerCase()))
+            .limit(1)
+            .maybeSingle();
+          const fit = typeof body.github === 'string' ? await personalFit(got.assessment, got.repo.full_name, body.github) : null;
+          return json({
+            answer: got.assessment.plain,
+            slugs: [...(tape ? [tape.slug] : []), ...got.assessment.overlaps.map((o) => o.slug)],
+            aisle: tape ? aisleOf(tape) : 'counter',
+            assessment: got.assessment,
+            repo: got.repo,
+            ...(fit ? { fit } : {}),
+            in_store: tape?.slug ?? null,
+            reviewed_at: got.reviewed_at,
+            cached: got.cached,
+            ...(got.stale ? { stale: true } : {}),
+          });
+        }
+        if (!q.ref.bare) return json({ error: CLERK_LINES.noRepo }, 404);
+        // a bare "owner/repo" GitHub does not know was probably just a question: fall through
+      } catch (e) {
+        if (e instanceof RateLimitError) return json({ error: CLERK_LINES.rateLimit }, 429);
+        if (e instanceof BudgetError) return json({ answer: CLERK_LINES.budget, ...plain });
+        if (e instanceof GitHubError) return json({ error: 'GitHub is rate-limiting the clerk. Try again in a few minutes.' }, 503);
+        console.error('[clerk:assess]', e);
+        return json({ error: 'The clerk is on break.' }, 500);
+      }
+    }
+
+    const text = q.kind === 'ask' ? q.text : String(body.question ?? '').trim();
     try {
-      const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').limit(400);
-      if (error) return json({ error: 'Catalog unavailable' }, 500);
-      return json(await clerk(question, data ?? []));
+      const rows = await candidates(text, 30);
+      if (!(await budgetLeft())) {
+        // free mode: no AI, just the best text matches
+        const hits = rows.filter((r) => r.match).slice(0, 5);
+        if (!hits.length) return json({ answer: CLERK_LINES.freeNone, ...plain });
+        return json({ answer: CLERK_LINES.free, slugs: hits.map((r) => r.slug), aisle: aisleOf(hits[0] as Parameters<typeof aisleOf>[0]) });
+      }
+      const used: [string, Parameters<OnUsage>[1]][] = [];
+      let out;
+      try {
+        out = await clerk(text, rows, (m, u) => used.push([m, u]));
+      } finally {
+        for (const [m, u] of used) await recordUsage('clerk', m, u);
+      }
+      if (!out.on_topic) return json({ answer: CLERK_LINES.offTopic, ...plain });
+      return json({ answer: out.answer, slugs: out.slugs, aisle: out.aisle });
     } catch (e) {
       console.error('[clerk]', e);
       return json({ error: 'The clerk is on break.' }, 500);
@@ -55,7 +112,7 @@ export async function handle(req: Request): Promise<Response> {
     try {
       const prof = await fetchProfile(github);
       if (!prof) return json({ error: "Couldn't find that GitHub user or repo" }, 404);
-      const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').limit(400);
+      const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').eq('archived', false).limit(400);
       if (error) return json({ error: 'Catalog unavailable' }, 500);
       const rec = await recommendForProfile(prof.text, data ?? []);
       return json({ ...rec, name: prof.name, kind: prof.kind, slugs: rec.picks.map((p) => p.slug) });

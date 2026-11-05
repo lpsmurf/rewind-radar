@@ -85,3 +85,76 @@ export interface Proposal {
   votes: number;
   created_at: string;
 }
+
+// ---------- clerk repo assessment (POST /clerk with a GitHub repo in the question) ----------
+export type GateKey = 'licence' | 'maintenance' | 'security' | 'cost' | 'lockin';
+/** ok=true means no concern for that gate. */
+export interface Gate { ok: boolean; note: string }
+
+export interface Assessment {
+  title: string;
+  /** 2-3 sentences: what it is, who it is for, how you run it. */
+  what: string;
+  ring: Ring;
+  /** 0-1 */
+  confidence: number;
+  /** One sentence a non-technical person understands. */
+  plain: string;
+  benefits: string[];
+  risks: string[];
+  gates: Record<GateKey, Gate>;
+  effort: 'S' | 'M' | 'L';
+  /** Tapes already in the store that overlap or pair well. */
+  overlaps: { slug: string; why: string }[];
+  steps: string[];
+  evidence: string[];
+  /** The README held text aimed at AI reviewers (prompt injection). */
+  ai_directed_text: boolean;
+}
+
+/** Computed in code from GitHub facts; never by the model. */
+export interface HealthSignals {
+  days_since_push: number;
+  active: boolean;
+  licence: string | null;
+  licence_kind: 'permissive' | 'copyleft' | 'other' | 'none';
+  archived: boolean;
+  stars: number;
+  forks: number;
+  open_issues: number;
+  issue_load: 'low' | 'medium' | 'high';
+  age_days: number;
+}
+
+export interface RepoSummary {
+  full_name: string;
+  html_url: string;
+  description: string | null;
+  language: string | null;
+  topics: string[];
+  stars: number;
+  forks: number;
+  license: string | null;
+  pushed_at: string;
+  archived: boolean;
+  open_issues: number;
+  signals: HealthSignals;
+}
+
+export type FitLevel = 'strong' | 'some' | 'weak' | 'none';
+export interface Fit { fit: FitLevel; why: string; helps: string[]; first_step: string }
+
+/** Response of POST /clerk. The assessment fields are present only when the question held a GitHub repo. */
+export interface ClerkReply {
+  answer: string;
+  slugs: string[];
+  aisle: string;
+  assessment?: Assessment;
+  repo?: RepoSummary;
+  fit?: Fit | null;
+  /** slug of the tape if this repo is already on a shelf */
+  in_store?: string | null;
+  reviewed_at?: string;
+  cached?: boolean;
+  stale?: boolean;
+}

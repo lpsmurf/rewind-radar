@@ -12,7 +12,9 @@
     "deploy:site": "scripts/publish-site.sh",
     "stats": "tsx scripts/stats.ts",
     "check:db": "tsx scripts/check-db.ts",
-    "provenance": "tsx scripts/apply-provenance.ts"
+    "provenance": "tsx scripts/apply-provenance.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.5.0",
@@ -31,7 +33,8 @@
     "@vitejs/plugin-react": "^4.7.0",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",
-    "vite": "^5.4.21"
+    "vite": "^5.4.21",
+    "vitest": "^3.2.7"
   },
   "engines": {
     "node": ">=20"

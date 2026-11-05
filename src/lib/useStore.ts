@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API, API_ABS } from './api';
-import type { Aisle, Proposal, Tape, Visitor } from '../types';
+import type { Aisle, ClerkReply, Proposal, Tape, Visitor } from '../types';
 import { GENRES } from '../types';
 import { MOCK_TAPES } from '../data/mock';
 import { sb } from './supabase';
-import { getVisitor } from './visitor';
+import { clearGithub, getGithub, getVisitor, setGithub } from './visitor';
 
 const COLS =
   'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
@@ -31,6 +31,9 @@ export function useStore() {
   const [highlighted, setHighlighted] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<string | null>(null);
   const [live, setLive] = useState(false);
+  const [github, setGithubState] = useState<string | null>(getGithub);
+  const githubRef = useRef<string | null>(github);
+  githubRef.current = github;
   const chanRef = useRef<ReturnType<NonNullable<typeof sb>['channel']> | null>(null);
   const toastTimer = useRef<number>();
 
@@ -188,22 +191,23 @@ export function useStore() {
   );
 
   const askClerk = useCallback(
-    async (q: string): Promise<string> => {
+    async (q: string): Promise<ClerkReply> => {
+      const onBreak = (answer = 'The clerk is on break.'): ClerkReply => ({ answer, slugs: [], aisle: 'counter' });
       try {
         const r = await fetch(`${API}/clerk`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ question: q, visitorId: meRef.current.id }),
+          body: JSON.stringify({ question: q, visitorId: meRef.current.id, ...(githubRef.current ? { github: githubRef.current } : {}) }),
         });
         const j = await r.json().catch(() => ({}));
-        if (!r.ok) return j.error || 'The clerk is on break.';
-        const slugs: string[] = j.slugs ?? [];
+        if (!r.ok) return onBreak(j.error || undefined);
+        const slugs: string[] = [...(j.slugs ?? []), ...(j.in_store ? [j.in_store] : [])];
         setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
         const valid = ['new', 'community', 'counter', 'entrance', ...GENRES];
         if (valid.includes(j.aisle)) setAisle(j.aisle as Aisle);
-        return j.answer ?? '';
+        return { ...j, answer: j.answer ?? '', slugs: j.slugs ?? [], aisle: j.aisle ?? 'counter' } as ClerkReply;
       } catch {
-        return 'The clerk is on break.';
+        return onBreak();
       }
     },
     [setAisle],
@@ -219,6 +223,10 @@ export function useStore() {
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) return j.error || 'The clerk is on break.';
+        if (j.kind === 'user' && typeof j.name === 'string' && j.name) {
+          setGithub(j.name);
+          setGithubState(j.name);
+        }
         const picks: { slug: string; why: string }[] = j.picks ?? [];
         const slugs = picks.map((p) => p.slug);
         setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
@@ -269,6 +277,11 @@ export function useStore() {
     [say],
   );
 
+  const forgetGithub = useCallback(() => {
+    clearGithub();
+    setGithubState(null);
+  }, []);
+
   const tapesRef = useRef<Tape[]>(tapes);
   tapesRef.current = tapes;
 
@@ -277,5 +290,5 @@ export function useStore() {
     [tapes],
   );
 
-  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, proposals, propose, backProposal, highlighted, toast, live };
+  return { tapes, top10, visitors, me, setAisle, vote, rent, submit, askClerk, scanProfile, github, forgetGithub, proposals, propose, backProposal, highlighted, toast, live };
 }
