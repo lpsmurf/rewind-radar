@@ -35,6 +35,8 @@ describe('checkMessage', () => {
       'here (https://www.github.com/a/b).',
       'store: https://lpsmurf.github.io/rewind-radar/',
       'lpsmurf.github.io/rewind-radar',
+      'https://github.com/a/b',
+      'a gist: https://gist.github.com/someone/123',
     ]) expect(checkMessage(t), t).toMatchObject({ ok: true });
   });
 
@@ -50,12 +52,23 @@ describe('checkMessage', () => {
       'ftp://github.com/a',
       'javascript://github.com/%0aalert(1)',
       'visit EXAMPLE.COM now',
+      'evil。com', 'evil．com', 'evil｡com', 'evil\u2024com', // unicode dots
+      'x.zip', 'foo.cloud', 'drop.xyz/free', 'a.b.sh', 'at 1.2.3.4 now',
+      'github.com.evil.com', 'github.com@evil.com', 'https://github.com@evil.com/x',
+      'https://ｅvil.com', // fullwidth letters fold to ascii
     ]) expect(checkMessage(t), t).toMatchObject({ ok: false, reason: CHAT_LINES.link });
   });
 
-  it('does not mistake dotted words for links', () => {
-    expect(checkMessage('i love node.js and e.g. python')).toMatchObject({ ok: true });
-    expect(checkMessage('version 1.2.3 is out')).toMatchObject({ ok: true });
+  it('does not mistake numbers and one-letter dots for links', () => {
+    expect(checkMessage('version 1.2.3 is out, e.g. today')).toMatchObject({ ok: true });
+    expect(checkMessage('price is 3.50 or so')).toMatchObject({ ok: true });
+  });
+
+  // Flipped on purpose: "i love node.js" used to pass. Any label.label with a 2+ letter ending now counts as a link,
+  // because a TLD list can never keep up (.zip, .cloud, .sh, .ai ...). The cost is that bare file names like node.js are refused.
+  it('treats any word.word as a link, whatever its ending', () => {
+    expect(checkMessage('i love node.js')).toMatchObject({ ok: false, reason: CHAT_LINES.link });
+    expect(checkMessage('hello.world')).toMatchObject({ ok: false, reason: CHAT_LINES.link });
   });
 
   it('blocks blocklisted words, case-insensitively and on word boundaries', () => {

@@ -25,22 +25,25 @@ const BLOCKLIST = [
 ];
 const BLOCK_RE = new RegExp(`\\b(?:${BLOCKLIST.map((w) => w.replace(/\s+/g, '\\s+')).join('|')})\\b`, 'i');
 
-const TLDS = 'com|net|org|io|dev|app|xyz|info|biz|co|me|ly|gg|tv|cc|ru|cn|tk|top|site|online|shop|club|link|click|live|ai|gl|to|sh|us|uk|de|fr|eu';
-const BARE_DOMAIN = new RegExp(`[a-z0-9-]\\.(?:${TLDS})(?![a-z0-9])`, 'i');
+// Anything shaped like word.word (an ending of 2+ letters, any TLD), a www. or scheme link, or a bare IPv4 is a link.
+const LABEL_DOT_LABEL = /[\p{L}\p{N}-]\.\p{L}{2,}(?![\p{L}\p{N}-])/u;
+const IPV4 = /\d+\.\d+\.\d+\.\d+/;
+// Dots that fold to "." for the link check: ideographic and halfwidth full stops, small full stop, one-dot leader, hyphenation point.
+const UNICODE_DOTS = /[\u3002\uFF0E\uFF61\uFE52\u2024\u2027\u0701\u0702]/g;
 
 function allowedUrl(u: URL): boolean {
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
   if (u.username || u.password || u.port) return false;
-  const host = u.hostname.toLowerCase();
-  if (host === 'github.com' || host === 'www.github.com') return true;
+  const host = u.hostname.toLowerCase().replace(/\.$/, '');
+  if (host === 'github.com' || host.endsWith('.github.com')) return true; // github.com and its subdomains (gist.github.com)
   return host === 'lpsmurf.github.io' && (u.pathname === '/rewind-radar' || u.pathname.startsWith('/rewind-radar/'));
 }
 
-/** True when every link-looking word points somewhere we allow. */
+/** True when every link-looking word points somewhere we allow. Looks at the NFKC-normalised text, so look-alike dots and letters cannot hide a link. */
 function linksOk(text: string): boolean {
-  for (const raw of text.split(' ')) {
+  for (const raw of text.normalize('NFKC').replace(UNICODE_DOTS, '.').split(' ')) {
     const w = raw.replace(/^[("'<\[]+/, '').replace(/[)"'>\].,!?;:]+$/, '');
-    if (!w || !(w.includes('://') || /^www\./i.test(w) || BARE_DOMAIN.test(w))) continue;
+    if (!w || !(w.includes('://') || /^www\./i.test(w) || LABEL_DOT_LABEL.test(w) || IPV4.test(w))) continue;
     try {
       if (!allowedUrl(new URL(w.includes('://') ? w : `https://${w}`))) return false;
     } catch {
