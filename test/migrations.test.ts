@@ -18,8 +18,8 @@ describe('004_chat.sql', () => {
     expect(sql).toMatch(/alter table public\.chat_messages enable row level security/);
     expect(sql).toMatch(/using \(not hidden and at > now\(\) - interval '24 hours'\)/);
     expect(sql).toMatch(/revoke all on public\.chat_messages from public, anon, authenticated/);
-    expect(sql).toMatch(/grant select on public\.chat_messages to anon, authenticated/);
-    expect(sql).not.toMatch(/for (insert|update|delete)/i);
+    expect(sql).toMatch(/grant select \(id, at, sender_key, login, tier, body, hidden\) on public\.chat_messages to anon, authenticated/); // never sender_id
+    expect(sql).not.toMatch(/create policy[^;]*for (insert|update|delete)/i); // the row lock "for update" in report_chat is not a policy
   });
   it('publishes to realtime idempotently and schedules a guarded hourly cleanup', () => {
     expect(sql).toMatch(/pg_publication_tables/);
@@ -27,5 +27,21 @@ describe('004_chat.sql', () => {
     expect(sql).toMatch(/cron\.unschedule/);
     expect(sql).toMatch(/pg_extension where extname = 'pg_cron'/);
     expect(sql).toMatch(/'0 \* \* \* \*'/);
+  });
+
+  it('keeps one report per reporter and a report_chat function only service_role may run', () => {
+    expect(sql).toMatch(/create table if not exists public\.chat_reports/);
+    expect(sql).toMatch(/primary key \(message_id, reporter\)/);
+    expect(sql).toMatch(/references public\.chat_messages\(id\) on delete cascade/);
+    expect(sql).toMatch(/alter table public\.chat_reports enable row level security/);
+    expect(sql).toMatch(/revoke all on public\.chat_reports from public, anon, authenticated/);
+    expect(sql).toMatch(/function public\.report_chat\(p_id bigint, p_reporter text\) returns boolean/);
+    expect(sql).toMatch(/security definer/);
+    expect(sql).toMatch(/on conflict do nothing/);
+    expect(sql).toMatch(/for update/); // serialises concurrent reports so the third one always sees the count
+    expect(sql).toMatch(/sender_id = p_reporter/); // no reporting your own message
+    expect(sql).toMatch(/>= 3 then\s+delete from public\.chat_messages/);
+    expect(sql).toMatch(/revoke execute on function public\.report_chat\(bigint, text\) from public, anon, authenticated/);
+    expect(sql).toMatch(/grant execute on function public\.report_chat\(bigint, text\) to service_role/);
   });
 });

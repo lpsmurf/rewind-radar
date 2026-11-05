@@ -764,7 +764,7 @@ describe('visitor chat', () => {
   function chatSetup(o: { spent?: number; row?: { reports: number; hidden: boolean } | null } = {}) {
     const d = setup(o);
     d.on('chat_messages', (q: Query) => {
-      if (has(q, 'insert')) return { data: { id: 7, at: '2026-11-05T10:00:00Z', ...arg(q, 'insert') }, error: null };
+      if (has(q, 'insert')) { const { sender_id: _private, ...row } = arg(q, 'insert'); return { data: { id: 7, at: '2026-11-05T10:00:00Z', ...row }, error: null }; } // the real .select() leaves out sender_id
       if (has(q, 'update')) return { data: null, error: null };
       if (has(q, 'select')) return { data: o.row === undefined ? { reports: 0, hidden: false } : o.row, error: null };
       return { data: null, error: null };
@@ -849,7 +849,7 @@ describe('visitor chat', () => {
       const r = await say('  hello   world ', { github: 'lpsmurf', key: 'k'.repeat(120) });
       expect(r.status).toBe(200);
       expect(r.body).toEqual({ id: 7, at: '2026-11-05T10:00:00Z', sender_key: 'k'.repeat(80), login: 'lpsmurf', tier: 'light', body: 'hello world' });
-      expect(insertsOf(d)).toEqual([{ sender_key: 'k'.repeat(80), login: 'lpsmurf', tier: 'light', body: 'hello world' }]);
+      expect(insertsOf(d)).toEqual([{ sender_key: 'k'.repeat(80), sender_id: 'gh:lpsmurf', login: 'lpsmurf', tier: 'light', body: 'hello world' }]);
       expect(d.calls('chat_messages')[0].calls.find((c: any) => c[0] === 'select')?.[1]).toBe('id,at,sender_key,login,tier,body');
       expect(create.mock.calls[0][0].model).toBe(HAIKU);
       expect(create.mock.calls[0][0].messages[0].content).toContain('hello world');
@@ -868,7 +868,7 @@ describe('visitor chat', () => {
       ok();
       const r = await post('chat', { text: 'hi there', key: KEY, github: 'someone-else' }, undefined, bearer('tok'));
       expect(r.status).toBe(200);
-      expect(insertsOf(d)).toEqual([{ sender_key: KEY, login: 'octo', tier: 'member', body: 'hi there' }]);
+      expect(insertsOf(d)).toEqual([{ sender_key: KEY, sender_id: 'm:uid-octo', login: 'octo', tier: 'member', body: 'hi there' }]);
     });
 
     it('over the daily budget it posts on the free checks alone: no moderation call', async () => {
@@ -921,54 +921,60 @@ describe('visitor chat', () => {
   describe('POST /chat/report', () => {
     const report = (id: unknown, o: { github?: string; ip?: string; headers?: Record<string, string> } = {}) =>
       post('chat/report', { id, ...(o.github === undefined ? {} : { github: o.github }) }, o.ip, o.headers);
+    const rpcCalls = (d: any) => d.calls('rpc:report_chat').map((q: Query) => arg(q, 'args'));
+    const withRpc = (removed = false) => {
+      const d = chatSetup();
+      d.on('rpc:report_chat', () => ({ data: removed, error: null }));
+      return d;
+    };
 
     it('is closed to guests', async () => {
-      const d = chatSetup();
+      const d = withRpc();
       const r = await post('chat/report', { id: 1, github: undefined });
       expect(r).toEqual({ status: 401, body: { error: CHAT_LINES.gate, gate: 'github' } });
       expect(d.queries).toHaveLength(0);
     });
 
-    it('counts a report without hiding the message', async () => {
-      const d = chatSetup({ row: { reports: 0, hidden: false } });
-      expect((await report(5)).status).toBe(200);
-      expect(updatesOf(d)).toEqual([{ reports: 1, hidden: false }]);
-      expect(has(d.calls('chat_messages').find((q: Query) => has(q, 'update'))!, 'eq', 'id', 5)).toBe(true);
+    it('hands the report to the database with the identity key as reporter', async () => {
+      const d = withRpc(false);
+      const r = await report(5, { github: 'Reporter-A' });
+      expect(r).toEqual({ status: 200, body: { ok: true, removed: false } });
+      expect(rpcCalls(d)).toEqual([{ p_id: 5, p_reporter: 'gh:reporter-a' }]);
     });
 
-    it('hides the message at the third report', async () => {
-      const d = chatSetup({ row: { reports: 2, hidden: false } });
-      expect((await report(5)).status).toBe(200);
-      expect(updatesOf(d)).toEqual([{ reports: 3, hidden: true }]);
+    it('reports a member by user id and tells the client when the message was removed (3rd distinct reporter)', async () => {
+      const d = withRpc(true);
+      d.tokens.tok = githubMember('octo', 'uid-7');
+      const r = await post('chat/report', { id: 5 }, undefined, bearer('tok'));
+      expect(r.body).toEqual({ ok: true, removed: true });
+      expect(rpcCalls(d)).toEqual([{ p_id: 5, p_reporter: 'm:uid-7' }]);
     });
 
-    it('never unhides a hidden message', async () => {
-      const d = chatSetup({ row: { reports: 1, hidden: true } });
-      await report(5);
-      expect(updatesOf(d)).toEqual([{ reports: 2, hidden: true }]);
-    });
-
-    it('counts one report per identity per message', async () => {
+    it('fails with 500 when the database call fails', async () => {
       const d = chatSetup();
-      expect((await report(5, { github: 'reporter-a' })).status).toBe(200);
-      expect((await report(5, { github: 'reporter-a' })).status).toBe(200);
-      expect(updatesOf(d)).toHaveLength(1);
-      expect((await report(5, { github: 'reporter-b' })).status).toBe(200);
-      expect(updatesOf(d)).toHaveLength(2);
+      d.on('rpc:report_chat', () => ({ data: null, error: { message: 'boom' } }));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect((await report(5)).status).toBe(500);
     });
 
     it('allows 10 reports per hour per identity', async () => {
-      chatSetup();
-      for (let i = 1; i <= 10; i++) expect((await report(i, { github: 'reporter-c' })).status).toBe(200);
-      expect((await report(11, { github: 'reporter-c' })).status).toBe(429);
+      withRpc();
+      for (let i = 1; i <= 10; i++) expect((await report(i, { github: 'reporter-c', ip: `10.8.${i}.1` })).status).toBe(200);
+      expect((await report(11, { github: 'reporter-c', ip: '10.8.99.1' })).status).toBe(429);
     });
 
-    it('404s a message that is gone and 400s a bad id', async () => {
-      const d = chatSetup({ row: null });
-      expect((await report(99)).status).toBe(404);
+    it('allows 10 reports per hour per IP, across identities', async () => {
+      withRpc();
+      for (let i = 1; i <= 10; i++) expect((await report(i, { github: `ip-reporter-${i}`, ip: '10.8.0.9' })).status).toBe(200);
+      expect((await report(11, { github: 'ip-reporter-new', ip: '10.8.0.9' })).status).toBe(429);
+      expect((await report(11, { github: 'ip-reporter-new', ip: '10.8.0.10' })).status).toBe(200);
+    });
+
+    it('400s a bad id', async () => {
+      const d = withRpc();
       expect((await report('abc')).status).toBe(400);
       expect((await report(-1)).status).toBe(400);
-      expect(updatesOf(d)).toHaveLength(0);
+      expect(d.calls('rpc:report_chat')).toHaveLength(0);
     });
   });
 

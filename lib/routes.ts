@@ -344,17 +344,12 @@ export async function handle(req: Request): Promise<Response> {
     if (path === 'chat/report') {
       const mid = Number(body.id);
       if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
-      if (limited(`report:${idKey}`, 10)) return json({ error: CHAT_LINES.limit }, 429);
-      if (limited(`reported:${idKey}:${mid}`, 1)) return json({ ok: true }); // already counted: one report per person per message
+      if (limited(`report:${idKey}`, 10) || limited('report-ip:' + who, 10)) return json({ error: CHAT_LINES.limit }, 429);
       try {
-        const db = admin();
-        const { data: row, error } = await db.from('chat_messages').select('reports,hidden').eq('id', mid).maybeSingle();
+        // One database call counts the report: one per reporter, none for your own message, removal at 3 distinct reporters.
+        const { data, error } = await admin().rpc('report_chat', { p_id: mid, p_reporter: idKey });
         if (error) throw error;
-        if (!row) return json({ error: CHAT_LINES.gone }, 404);
-        const reports = Number(row.reports ?? 0) + 1;
-        const { error: upErr } = await db.from('chat_messages').update({ reports, hidden: !!row.hidden || reports >= 3 }).eq('id', mid);
-        if (upErr) throw upErr;
-        return json({ ok: true });
+        return json({ ok: true, removed: data === true });
       } catch (e) {
         console.error('[chat:report]', e);
         return json({ error: 'Could not send the report' }, 500);
@@ -381,7 +376,7 @@ export async function handle(req: Request): Promise<Response> {
     try {
       const { data, error } = await admin()
         .from('chat_messages')
-        .insert({ sender_key: key, login: id.github, tier: id.tier, body: checked.text })
+        .insert({ sender_key: key, sender_id: idKey, login: id.github, tier: id.tier, body: checked.text })
         .select('id,at,sender_key,login,tier,body')
         .single();
       if (error) throw error;
