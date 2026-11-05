@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import Store from './store/Store';
 import { useStore } from './lib/useStore';
-import { RING_COLORS, type Tape } from './types';
+import { RING_COLORS, type Assessment, type RepoSummary, type Tape } from './types';
 import TapePanel from './ui/TapePanel';
 import ClerkDrawer from './ui/ClerkDrawer';
 import SubmitModal from './ui/SubmitModal';
@@ -14,6 +14,7 @@ export default function App() {
   const [open, setOpen] = useState<Tape | null>(null);
   const [clerkOpen, setClerkOpen] = useState(false);
   const [submitOpen, setSubmitOpen] = useState(false);
+  const [submitInitial, setSubmitInitial] = useState<{ title: string; url: string; note: string } | undefined>();
   const [proposeOpen, setProposeOpen] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
 
@@ -29,6 +30,12 @@ export default function App() {
   }, []);
   const cur = open ? s.tapes.find((t) => t.id === open.id) ?? open : null;
   const chips = s.tapes.filter((t) => s.highlighted.has(t.id));
+  const openSubmit = (initial?: { title: string; url: string; note: string }) => {
+    setSubmitInitial(initial);
+    setSubmitOpen(true);
+  };
+  const onShelve = (r: RepoSummary, a: Assessment) =>
+    openSubmit({ title: r.full_name.split('/')[1] ?? r.full_name, url: r.html_url, note: a.plain });
 
   return (
     <div className="app">
@@ -40,7 +47,7 @@ export default function App() {
         <span className="live">{s.live ? '● LIVE' : '○ LOCAL'} · {s.visitors.length + 1} in store</span>
         <div className="row">
           <button className="btn" onClick={() => setClerkOpen(true)}>ASK THE CLERK</button>
-          <button className="btn alt" onClick={() => setSubmitOpen(true)}>SUBMIT YOUR PROJECT</button>
+          <button className="btn alt" onClick={() => openSubmit()}>SUBMIT YOUR PROJECT</button>
           <button className="btn" onClick={() => setProposeOpen(true)}>PROPOSE AN IDEA</button>
           <button className="btn alt" onClick={() => setQrOpen(true)}>SHOW QR</button>
         </div>
@@ -78,8 +85,8 @@ export default function App() {
         </aside>
       </main>
       {cur && <TapePanel tape={cur} onClose={() => setOpen(null)} onRent={() => s.rent(cur)} onVote={() => s.vote(cur)} />}
-      {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} />}
-      {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} />}
+      {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} github={s.github} onForget={s.forgetGithub} tapes={s.tapes} onShelve={onShelve} />}
+      {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} initial={submitInitial} />}
       {proposeOpen && <ProposeModal onClose={() => setProposeOpen(false)} propose={s.propose} />}
       {qrOpen && <BigQR inStore={s.visitors.length + 1} onClose={() => setQrOpen(false)} />}
       {s.toast && <div className="toast">{s.toast}</div>}

@@ -30,3 +30,28 @@ export function getVisitor(): Visitor {
     aisle: 'entrance',
   };
 }
+
+/** GitHub username remembered after a profile scan (enables the FIT check). */
+export function getGithub(): string | null {
+  try {
+    return localStorage.getItem('rr_github') || null;
+  } catch {
+    return null;
+  }
+}
+
+export function setGithub(u: string): void {
+  try {
+    localStorage.setItem('rr_github', u);
+  } catch {
+    /* storage blocked */
+  }
+}
+
+export function clearGithub(): void {
+  try {
+    localStorage.removeItem('rr_github');
+  } catch {
+    /* storage blocked */
+  }
+}

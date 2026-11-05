@@ -1,5 +1,5 @@
 import { admin } from './admin.ts';
-import { reviewRepo } from './ai.ts';
+import { reviewRepo, type OnUsage } from './ai.ts';
 import { searchWeekly } from './github.ts';
 
 async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
@@ -17,12 +17,12 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
 }
 
 /** Fetch this week's top GitHub repos, have Claude review them, upsert as New Releases. */
-export async function refreshRadar(n = 20): Promise<number> {
+export async function refreshRadar(n = 20, onUsage?: OnUsage): Promise<number> {
   const repos = await searchWeekly(n);
   const week = new Date();
   week.setUTCDate(week.getUTCDate() - ((week.getUTCDay() + 6) % 7));
   const rows = await pool(repos, 5, async (r) => {
-    const rev = await reviewRepo(r);
+    const rev = await reviewRepo(r, onUsage);
     return {
       kind: 'repo',
       slug: `gh-${r.full_name.replace('/', '-')}`.toLowerCase(),

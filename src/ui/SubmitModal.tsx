@@ -1,10 +1,16 @@
 import { useState } from 'react';
 
-export default function SubmitModal({ onClose, submit }: {
+export default function SubmitModal({ onClose, submit, initial }: {
   onClose(): void;
   submit(f: { title: string; url: string; note: string; submitter: string }): Promise<boolean>;
+  initial?: Partial<{ title: string; url: string; note: string; submitter: string }>;
 }) {
-  const [f, setF] = useState({ title: '', url: '', note: '', submitter: '' });
+  const [f, setF] = useState(() => ({
+    title: (initial?.title ?? '').slice(0, 80),
+    url: initial?.url ?? '',
+    note: (initial?.note ?? '').slice(0, 200),
+    submitter: initial?.submitter ?? '',
+  }));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState('');
   const set = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value });
