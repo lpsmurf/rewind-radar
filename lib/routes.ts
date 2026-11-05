@@ -1,6 +1,6 @@
 import { admin } from './admin.ts';
 import { clerk, recommendForProfile, reviewProposal, reviewSubmission, type OnUsage } from './ai.ts';
-import { BudgetError, budgetLeft, getAssessment, personalFit, RateLimitError, recordUsage } from './assess.ts';
+import { BudgetError, budgetLeft, checkRouteLimits, getAssessment, personalFit, RateLimitError, recordUsage } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
@@ -144,6 +144,15 @@ export async function handle(req: Request): Promise<Response> {
       const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').eq('archived', false).limit(400);
       if (error) return json({ error: 'Catalog unavailable' }, 500);
       if (!(await budgetLeft({ failClosed: true }))) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      try {
+        await checkRouteLimits('profile', {
+          maxPerHour: Number(env('AI_PROFILE_MAX_PER_HOUR') || '30'),
+          budgetUsd: Number(env('AI_PROFILE_BUDGET_USD') || '1'),
+        });
+      } catch (e) {
+        if (e instanceof RateLimitError || e instanceof BudgetError) return json({ error: CLERK_LINES.budgetBusy }, 503);
+        throw e;
+      }
       const rec = await meter('profile', (onUsage) => recommendForProfile(prof.text, data ?? [], onUsage));
       return json({ ...rec, name: prof.name, kind: prof.kind, slugs: rec.picks.map((p) => p.slug) });
     } catch (e) {

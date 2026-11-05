@@ -217,6 +217,47 @@ describe('every Anthropic route is budget-gated and metered', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  describe('/profile database caps', () => {
+    const rows = (n: number, cost = 0.01) => Array.from({ length: n }, () => ({ at: new Date().toISOString(), cost_usd: cost }));
+    const withUsage = (r: unknown) => {
+      const d = setup();
+      d.on('ai_usage', (q: Query) => (has(q, 'select') ? (r === 'error' ? { data: null, error: { message: 'boom' } } : { data: r, error: null }) : { data: null, error: null }));
+      return d;
+    };
+    const scan = () => post('profile', { github: 'lpsmurf', visitorId: vid() });
+
+    it('503s once AI_PROFILE_MAX_PER_HOUR scans ran this hour (default 30)', async () => {
+      stubGitHub(PROFILE);
+      const d = withUsage(rows(30));
+      const r = await scan();
+      expect(r.status).toBe(503);
+      expect(r.body.error).toBe(CLERK_LINES.budgetBusy);
+      expect(create).not.toHaveBeenCalled();
+      expect(has(d.calls('ai_usage').find((q: Query) => has(q, 'select'))!, 'eq', 'route', 'profile')).toBe(true);
+    });
+
+    it('503s once today\'s profile spend reaches AI_PROFILE_BUDGET_USD (default 1)', async () => {
+      stubGitHub(PROFILE);
+      withUsage(rows(2, 0.6));
+      expect((await scan()).status).toBe(503);
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when the usage query errors', async () => {
+      stubGitHub(PROFILE);
+      withUsage('error');
+      expect((await scan()).status).toBe(503);
+      expect(create).not.toHaveBeenCalled();
+    });
+
+    it('lets a scan through under the caps', async () => {
+      stubGitHub(PROFILE);
+      withUsage(rows(3));
+      create.mockResolvedValue(toolReply('profile_radar', { answer: 'ok', picks: [], aisle: 'counter' }));
+      expect((await scan()).status).toBe(200);
+    });
+  });
+
   it('/submit records usage as "submit"; over budget gives 503 and inserts nothing', async () => {
     stubGitHub(POSTIZ);
     const d = setup();
