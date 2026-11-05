@@ -1,14 +1,14 @@
 import { admin } from './admin.ts';
-import { assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, type OnUsage } from './ai.ts';
+import { AssessError, assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, type OnUsage } from './ai.ts';
 import { candidates } from './catalog.ts';
 import { env } from './env.ts';
-import { fetchProfile, fetchRepoFacts, type RepoFacts, type RepoRef } from './github.ts';
+import { fetchProfile, fetchRepoFacts, repoExists, type RepoFacts, type RepoRef } from './github.ts';
 import type { Assessment, Fit, GateKey, HealthSignals, Ring, RepoSummary } from './types.ts';
 
 export { sanitizeUntrusted }; // lives in ai.ts (assess.ts imports ai.ts, not the other way round)
 
 /** Bump when the assessment prompt or schema changes: older cached rows are then re-assessed. */
-export const PROMPT_VERSION = 1;
+export const PROMPT_VERSION = 2;
 export const ASSESS_TTL_DAYS = 7;
 
 export class RateLimitError extends Error {}
@@ -89,19 +89,63 @@ export function normalizeAssessment(raw: unknown, knownSlugs: string[]): Assessm
   };
 }
 
+/**
+ * The model reads a README that may be persuasive; the ring is capped in code from facts it cannot argue with:
+ * archived -> hold; no licence or no push for over a year -> at most trial. Only ever lowers a ring.
+ */
+export function clampRing(a: Assessment, s: HealthSignals): Assessment {
+  let max: Ring = 'adopt';
+  let why = '';
+  if (s.archived) [max, why] = ['hold', 'Repo is archived; ring capped at hold.'];
+  else if (s.licence_kind === 'none') [max, why] = ['trial', 'No licence found; ring capped at trial.'];
+  else if (s.days_since_push > 365) [max, why] = ['trial', 'No push in over a year; ring capped at trial.'];
+  if (RINGS.indexOf(a.ring) >= RINGS.indexOf(max)) return a;
+  return { ...a, ring: max, risks: [why, ...a.risks].slice(0, 6) };
+}
+
 // ---------- spend meter ----------
-/** False once today's AI spend has reached AI_DAILY_BUDGET_USD. Fails open if the meter is unavailable. */
-export async function budgetLeft(): Promise<boolean> {
+/**
+ * False once today's AI spend has reached AI_DAILY_BUDGET_USD. If the meter is unavailable it fails open,
+ * or closed with `failClosed` (use that before any Sonnet call).
+ */
+export async function budgetLeft(o: { failClosed?: boolean } = {}): Promise<boolean> {
   const cap = Number(env('AI_DAILY_BUDGET_USD') || '5');
   try {
     const { data, error } = await admin().rpc('ai_spend_today');
     if (error) throw error;
     return Number(data ?? 0) < cap;
   } catch (e) {
-    console.warn('[budget] spend meter unavailable, allowing', e);
-    return true;
+    console.warn(`[budget] spend meter unavailable, ${o.failClosed ? 'blocking' : 'allowing'}`, e);
+    return !o.failClosed;
   }
 }
+
+/**
+ * Database-backed caps on one Sonnet route, shared by every Edge isolate: calls per hour, and spend per UTC day
+ * (its own budget, smaller than the clerk's). Throws RateLimitError / BudgetError; fails closed if the query breaks.
+ */
+export async function checkRouteLimits(route: string, o: { maxPerHour: number; budgetUsd: number }): Promise<void> {
+  const now = Date.now();
+  const dayStart = new Date(now);
+  dayStart.setUTCHours(0, 0, 0, 0);
+  let rows: { at: string; cost_usd: number }[];
+  try {
+    const { data, error } = await admin().from('ai_usage').select('at,cost_usd').eq('route', route).gte('at', dayStart.toISOString());
+    if (error) throw error;
+    rows = (data ?? []) as typeof rows;
+  } catch (e) {
+    console.warn(`[${route}] usage query failed, blocking`, e);
+    throw new BudgetError();
+  }
+  if (rows.filter((r) => now - Date.parse(r.at) < 3600_000).length >= o.maxPerHour) throw new RateLimitError();
+  if (rows.reduce((sum, r) => sum + Number(r.cost_usd ?? 0), 0) >= o.budgetUsd) throw new BudgetError();
+}
+
+const checkAssessLimits = () =>
+  checkRouteLimits('assess', {
+    maxPerHour: Number(env('AI_ASSESS_MAX_PER_HOUR') || '20'),
+    budgetUsd: Number(env('AI_ASSESS_BUDGET_USD') || '2'),
+  });
 
 /** Log one Anthropic call to ai_usage and return its cost. Never throws. */
 export async function recordUsage(route: string, model: string, usage: Usage, repo?: string): Promise<number> {
@@ -136,7 +180,8 @@ export interface AssessmentResult {
 interface Row { data: Assessment; facts: RepoSummary; updated_at: string; prompt_version: number; hits: number | null }
 
 const fromRow = (row: Row, stale = false): AssessmentResult => ({
-  assessment: row.data,
+  // older rows (before the code-side ring clamp) must not serve an unclamped verdict
+  assessment: row.facts?.signals ? clampRing(row.data, row.facts.signals) : row.data,
   repo: row.facts,
   reviewed_at: row.updated_at,
   cached: true,
@@ -145,12 +190,14 @@ const fromRow = (row: Row, stale = false): AssessmentResult => ({
 
 /**
  * Cached for ASSESS_TTL_DAYS. A miss costs one GitHub read and one Sonnet call, so it must pass `allowMiss`
- * (rate limit) and the daily budget; if either fails, or the refresh breaks, an old row is served as stale.
- * null = GitHub has no such repo.
+ * (per-IP limit), the database hourly/assess-budget caps and the daily budget; if any of them says no, or the
+ * refresh breaks, an old row is served as stale (RateLimitError/BudgetError only when there is no row).
+ * null = GitHub has no such repo. A bare owner/repo is verified to exist first.
  */
 export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean }): Promise<AssessmentResult | null> {
   const key = ref.full.toLowerCase();
-  const { data } = await admin().from('assessments').select('data,facts,prompt_version,updated_at,hits').eq('repo', key).maybeSingle();
+  const { data, error } = await admin().from('assessments').select('data,facts,prompt_version,updated_at,hits').eq('repo', key).maybeSingle();
+  if (error) throw new Error(`assessments read failed: ${error.message}`); // never treat a broken cache as a miss
   const row = (data ?? null) as Row | null;
 
   if (row && row.prompt_version === PROMPT_VERSION && Date.now() - Date.parse(row.updated_at) < ASSESS_TTL_DAYS * 864e5) {
@@ -158,10 +205,31 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     return fromRow(row);
   }
 
-  if (!o.allowMiss()) throw new RateLimitError();
-  if (!(await budgetLeft())) {
+  // A bare "owner/repo" is only a guess ("tcp/ip"): make sure it is real before it costs any quota or budget.
+  if (ref.bare && !row) {
+    const { data: tape, error: tapeErr } = await admin()
+      .from('tapes')
+      .select('slug')
+      .in('slug', [`gh-${key.replace('/', '-')}`, `c-${key.replace('/', '-')}`])
+      .limit(1)
+      .maybeSingle();
+    if (!tapeErr && !tape && !(await repoExists(ref))) return null;
+  }
+
+  // Budget and database caps first, so a refused request does not burn the visitor's per-IP slot.
+  if (!(await budgetLeft({ failClosed: true }))) {
     if (row) return fromRow(row, true);
     throw new BudgetError();
+  }
+  try {
+    await checkAssessLimits();
+  } catch (e) {
+    if (row) return fromRow(row, true);
+    throw e;
+  }
+  if (!o.allowMiss()) {
+    if (row) return fromRow(row, true);
+    throw new RateLimitError();
   }
 
   try {
@@ -170,7 +238,8 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     const signals = healthSignals(facts);
     const cands = await candidates(`${facts.full_name} ${facts.description ?? ''} ${facts.topics.join(' ')}`, 20);
     const { raw, usage, model } = await assessRepoAI(facts, signals, facts.readme, cands);
-    const assessment = normalizeAssessment(raw, cands.map((c) => c.slug));
+    const cost = await recordUsage('assess', model, usage, key); // meter before anything else can throw
+    const assessment = clampRing(normalizeAssessment(raw, cands.map((c) => c.slug)), signals);
     const repo: RepoSummary = {
       full_name: facts.full_name,
       html_url: facts.html_url,
@@ -185,7 +254,6 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
       open_issues: facts.open_issues,
       signals,
     };
-    const cost = await recordUsage('assess', model, usage, key);
     const reviewed_at = new Date().toISOString();
     const { error } = await admin().from('assessments').upsert({
       repo: key,
@@ -204,6 +272,8 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     if (error) console.warn('[assess] could not cache', error.message); // the visitor still gets the answer we paid for
     return { assessment, repo, reviewed_at, cached: false };
   } catch (e) {
+    // A refusal, cut-off or unreadable answer still cost tokens: count them toward both budgets.
+    if (e instanceof AssessError && e.usage && e.model) await recordUsage('assess', e.model, e.usage, key);
     if (row) {
       console.warn('[assess] refresh failed, serving stale', e);
       return fromRow(row, true);

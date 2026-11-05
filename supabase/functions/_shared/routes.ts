@@ -1,6 +1,6 @@
 import { admin } from './admin.ts';
 import { clerk, recommendForProfile, reviewProposal, reviewSubmission, type OnUsage } from './ai.ts';
-import { BudgetError, budgetLeft, getAssessment, personalFit, RateLimitError, recordUsage } from './assess.ts';
+import { BudgetError, budgetLeft, checkRouteLimits, getAssessment, personalFit, RateLimitError, recordUsage } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
@@ -16,15 +16,47 @@ const CORS: Record<string, string> = {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...CORS, 'content-type': 'application/json' } });
 
-// Per-instance rate limits (good enough for a demo).
+// Per-instance rate limits (good enough for a demo; the Sonnet limits also live in the database).
 const hits = new Map<string, number[]>();
+const MAX_KEYS = 5000;
+const HOUR = 3600_000;
+function prune(now: number) {
+  for (const [k, ts] of hits) if (ts.every((t) => now - t >= HOUR)) hits.delete(k);
+  // still over the cap: drop the oldest entries (Map keeps insertion order)
+  for (const k of hits.keys()) {
+    if (hits.size <= MAX_KEYS) break;
+    hits.delete(k);
+  }
+}
 function limited(id: string, max: number): boolean {
+  const key = id.slice(0, 100);
   const now = Date.now();
-  const arr = (hits.get(id) ?? []).filter((t) => now - t < 3600_000);
-  if (arr.length >= max) return hits.set(id, arr), true;
-  arr.push(now);
-  hits.set(id, arr);
-  return false;
+  const arr = (hits.get(key) ?? []).filter((t) => now - t < HOUR);
+  hits.delete(key); // re-insert so the newest keys sit last
+  const over = arr.length >= max;
+  if (!over) arr.push(now);
+  hits.set(key, arr);
+  if (hits.size > MAX_KEYS) prune(now);
+  return over;
+}
+
+/** The client IP: cf-connecting-ip (Cloudflare overwrites it), else the last x-forwarded-for hop; earlier hops are client-supplied. */
+// TODO: confirm which header is trustworthy on a deployed Supabase Edge request.
+function clientKey(req: Request): string {
+  const cf = req.headers.get('cf-connecting-ip')?.trim();
+  if (cf) return cf.slice(0, 64);
+  const hops = (req.headers.get('x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+  return (hops[hops.length - 1] ?? 'anon').slice(0, 64);
+}
+
+/** Run an AI call, collect its usage, and record it (even if the call throws). */
+async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): Promise<T> {
+  const used: [string, Parameters<OnUsage>[1]][] = [];
+  try {
+    return await run((m, u) => used.push([m, u]));
+  } finally {
+    for (const [m, u] of used) await recordUsage(route, m, u);
+  }
 }
 
 const TAPE_COLS = 'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
@@ -32,9 +64,8 @@ const TAPE_COLS = 'id,kind,slug,title,genre,blurb,source_url,stars,language,ring
 export async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
   const path = new URL(req.url).pathname.replace(/^.*?\/api\/?/, '').replace(/\/$/, '');
-  const ip = req.headers.get('x-forwarded-for') ?? 'anon';
+  const who = clientKey(req);
   const body = req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
-  const who = String(body.visitorId ?? ip);
 
   // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
@@ -45,7 +76,7 @@ export async function handle(req: Request): Promise<Response> {
 
     if (q.kind === 'repo') {
       try {
-        const got = await getAssessment(q.ref, { allowMiss: () => !limited('assess:' + who, 5) && !limited('assess:all', 60) });
+        const got = await getAssessment(q.ref, { allowMiss: () => !limited('assess:' + who, 5) });
         if (got) {
           const { owner, repo } = q.ref;
           const { data: tape } = await admin()
@@ -72,11 +103,15 @@ export async function handle(req: Request): Promise<Response> {
         if (!q.ref.bare) return json({ error: CLERK_LINES.noRepo }, 404);
         // a bare "owner/repo" GitHub does not know was probably just a question: fall through
       } catch (e) {
-        if (e instanceof RateLimitError) return json({ error: CLERK_LINES.rateLimit }, 429);
-        if (e instanceof BudgetError) return json({ answer: CLERK_LINES.budget, ...plain });
-        if (e instanceof GitHubError) return json({ error: 'GitHub is rate-limiting the clerk. Try again in a few minutes.' }, 503);
-        console.error('[clerk:assess]', e);
-        return json({ error: 'The clerk is on break.' }, 500);
+        // a bare "owner/repo" is only a guess: whatever went wrong, answer it as a normal question
+        if (!q.ref.bare) {
+          if (e instanceof RateLimitError) return json({ error: CLERK_LINES.rateLimit }, 429);
+          if (e instanceof BudgetError) return json({ answer: CLERK_LINES.budget, ...plain });
+          if (e instanceof GitHubError) return json({ error: 'GitHub is rate-limiting the clerk. Try again in a few minutes.' }, 503);
+          console.error('[clerk:assess]', e);
+          return json({ error: 'The clerk is on break.' }, 500);
+        }
+        console.warn('[clerk:assess] bare ref fell through', e);
       }
     }
 
@@ -89,13 +124,7 @@ export async function handle(req: Request): Promise<Response> {
         if (!hits.length) return json({ answer: CLERK_LINES.freeNone, ...plain });
         return json({ answer: CLERK_LINES.free, slugs: hits.map((r) => r.slug), aisle: aisleOf(hits[0] as Parameters<typeof aisleOf>[0]) });
       }
-      const used: [string, Parameters<OnUsage>[1]][] = [];
-      let out;
-      try {
-        out = await clerk(text, rows, (m, u) => used.push([m, u]));
-      } finally {
-        for (const [m, u] of used) await recordUsage('clerk', m, u);
-      }
+      const out = await meter('clerk', (onUsage) => clerk(text, rows, onUsage));
       if (!out.on_topic) return json({ answer: CLERK_LINES.offTopic, ...plain });
       return json({ answer: out.answer, slugs: out.slugs, aisle: out.aisle });
     } catch (e) {
@@ -114,7 +143,17 @@ export async function handle(req: Request): Promise<Response> {
       if (!prof) return json({ error: "Couldn't find that GitHub user or repo" }, 404);
       const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').eq('archived', false).limit(400);
       if (error) return json({ error: 'Catalog unavailable' }, 500);
-      const rec = await recommendForProfile(prof.text, data ?? []);
+      if (!(await budgetLeft({ failClosed: true }))) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      try {
+        await checkRouteLimits('profile', {
+          maxPerHour: Number(env('AI_PROFILE_MAX_PER_HOUR') || '30'),
+          budgetUsd: Number(env('AI_PROFILE_BUDGET_USD') || '1'),
+        });
+      } catch (e) {
+        if (e instanceof RateLimitError || e instanceof BudgetError) return json({ error: CLERK_LINES.budgetBusy }, 503);
+        throw e;
+      }
+      const rec = await meter('profile', (onUsage) => recommendForProfile(prof.text, data ?? [], onUsage));
       return json({ ...rec, name: prof.name, kind: prof.kind, slugs: rec.picks.map((p) => p.slug) });
     } catch (e) {
       console.error('[profile]', e);
@@ -135,8 +174,9 @@ export async function handle(req: Request): Promise<Response> {
     if (submitter.length > 30) return json({ error: 'Handle must be 30 characters or fewer' }, 400);
     if (limited('submit:' + who, 3)) return json({ error: 'Max 3 submissions per hour' }, 429);
     try {
+      if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
       const repo = await fetchRepo(url);
-      const review = await reviewSubmission({ title, url, note, repo });
+      const review = await meter('submit', (onUsage) => reviewSubmission({ title, url, note, repo }, onUsage));
       const { data, error } = await admin()
         .from('tapes')
         .insert({
@@ -176,12 +216,13 @@ export async function handle(req: Request): Promise<Response> {
     const secret = env('CRON_SECRET');
     const forced = !!secret && req.headers.get('x-cron-secret') === secret;
     const db = admin();
+    if (!(await budgetLeft())) return json({ ok: true, skipped: true, reason: 'budget' });
     const { data: last } = await db.from('radar_runs').select('ran_at').order('ran_at', { ascending: false }).limit(1).maybeSingle();
     const hours = last ? (Date.now() - new Date(last.ran_at).getTime()) / 36e5 : Infinity;
     if (!forced && hours < 60) return json({ ok: true, skipped: true, due_in_hours: Math.ceil(60 - hours) });
     const { data: run, error } = await db.from('radar_runs').insert({ stocked: 0 }).select('id').single();
     if (error || !run) return json({ error: 'Could not start refresh' }, 500);
-    const job = refreshRadar(20)
+    const job = meter('radar', (onUsage) => refreshRadar(20, onUsage))
       .then(async (n) => { await db.from('radar_runs').update({ stocked: n }).eq('id', run.id); return n; })
       .catch(async (e) => { console.error('[radar]', e); await db.from('radar_runs').delete().eq('id', run.id); throw e; });
     const rt = (globalThis as any).EdgeRuntime;
@@ -210,7 +251,8 @@ export async function handle(req: Request): Promise<Response> {
     if (visitorId.length < 8 || visitorId.length > 64) return json({ error: 'Missing visitor id' }, 400);
     if (limited('propose:' + who, 5)) return json({ error: 'Max 5 proposals per hour' }, 429);
     try {
-      const r = await reviewProposal({ title, pitch, link });
+      if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      const r = await meter('propose', (onUsage) => reviewProposal({ title, pitch, link }, onUsage));
       if (!r.allowed) return json({ error: `The clerk turned this one down: ${r.reason || 'not a fit for the store'}` }, 422);
       const { data, error } = await admin()
         .from('proposals')

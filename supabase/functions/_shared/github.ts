@@ -156,6 +156,28 @@ async function topLevel(full: string): Promise<string[]> {
   }
 }
 
+const exists = new Map<string, { at: number; ok: boolean }>(); // insertion order = age
+const EXISTS_MAX = 2000;
+const EXISTS_TTL = { miss: 3600_000, hit: 600_000 };
+export const clearRepoExistsCache = () => exists.clear();
+
+/**
+ * Cheap existence check (one GitHub read), cached per owner/repo so repeated guesses like "tcp/ip" cost nothing.
+ * false = 404; throws GitHubError when GitHub refuses (e.g. rate limit; not cached).
+ */
+export async function repoExists(ref: RepoRef): Promise<boolean> {
+  const key = `${ref.owner}/${ref.repo}`.toLowerCase();
+  const hit = exists.get(key);
+  if (hit && Date.now() - hit.at < (hit.ok ? EXISTS_TTL.hit : EXISTS_TTL.miss)) return hit.ok;
+  const r = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`, { headers: headers() });
+  if (r.status !== 404 && !r.ok) throw new GitHubError(r.status);
+  const ok = r.status !== 404;
+  exists.delete(key);
+  exists.set(key, { at: Date.now(), ok });
+  if (exists.size > EXISTS_MAX) exists.delete(exists.keys().next().value as string);
+  return ok;
+}
+
 /** Facts the assessment is built on. null = no such repo; throws GitHubError when GitHub refuses (e.g. rate limit). */
 export async function fetchRepoFacts(ref: RepoRef): Promise<RepoFacts | null> {
   const path = `${ref.owner}/${ref.repo}`;
