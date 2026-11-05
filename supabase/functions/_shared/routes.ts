@@ -1,7 +1,8 @@
 import { admin } from './admin.ts';
-import { clerk, recommendForProfile, reviewProposal, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
+import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates } from './catalog.ts';
+import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
@@ -11,7 +12,7 @@ import { aisleOf } from './types.ts';
 
 const CORS: Record<string, string> = {
   'access-control-allow-origin': '*',
-  'access-control-allow-headers': 'authorization, x-client-info, apikey, content-type',
+  'access-control-allow-headers': 'authorization, x-client-info, apikey, content-type, x-admin-token',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
 };
 const json = (body: unknown, status = 200) =>
@@ -39,6 +40,29 @@ function limited(id: string, max: number, peek = false): boolean {
   hits.set(key, arr);
   if (hits.size > MAX_KEYS) prune(now);
   return over;
+}
+
+/** True when `id` did this less than `ms` ago; otherwise remembers now. For short gaps ("1 message per 2 s") that `limited` cannot express. */
+const lastSeen = new Map<string, number>();
+function cooldown(id: string, ms: number): boolean {
+  const key = id.slice(0, 100);
+  const now = Date.now();
+  const last = lastSeen.get(key);
+  if (last !== undefined && now - last < ms) return true;
+  lastSeen.delete(key); // re-insert so the newest keys sit last
+  lastSeen.set(key, now);
+  for (const k of lastSeen.keys()) {
+    if (lastSeen.size <= MAX_KEYS) break;
+    lastSeen.delete(k);
+  }
+  return false;
+}
+
+/** Compare two secrets without stopping at the first difference. */
+function sameSecret(a: string, b: string): boolean {
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
+  return diff === 0;
 }
 
 /** The client IP: cf-connecting-ip (Cloudflare overwrites it), else the last x-forwarded-for hop; earlier hops are client-supplied. */
@@ -71,6 +95,18 @@ async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): P
     return await run((m, u) => used.push([m, u]));
   } finally {
     for (const [m, u] of used) await recordUsage(route, m, u);
+  }
+}
+
+/** Today's chat moderation spend is under its own cap. Fails closed when the meter breaks. */
+async function chatBudgetLeft(): Promise<boolean> {
+  try {
+    const { data, error } = await admin().rpc('chat_spend_today');
+    if (error) throw error;
+    return Number(data ?? 0) < Number(env('AI_CHAT_BUDGET_USD') || '0.5');
+  } catch (e) {
+    console.warn('[chat] spend meter unavailable, resting', e);
+    return false;
   }
 }
 
@@ -308,6 +344,76 @@ export async function handle(req: Request): Promise<Response> {
       console.error('[propose]', e);
       return json({ error: 'The clerk is on break.' }, 500);
     }
+  }
+
+  // --- visitor chat: guests may watch, light and member visitors may talk ---
+  if ((path === 'chat' || path === 'chat/report') && req.method === 'POST') {
+    const id = await whoIs(req, body, { allowLookup: (dry) => !limited('lookup:' + who, Number(env('GATE_LOOKUPS_PER_HOUR') || '20'), dry) });
+    if (id.tier === 'busy') return json({ error: id.why === 'limit' ? CLERK_LINES.gateLookups : CLERK_LINES.gateBusy }, id.why === 'limit' ? 429 : 503);
+    if (id.tier === 'guest') return json({ error: CHAT_LINES.gate, gate: 'github' }, 401);
+    const idKey = id.tier === 'member' ? `m:${id.userId}` : `gh:${id.github.toLowerCase()}`;
+
+    if (path === 'chat/report') {
+      const mid = Number(body.id);
+      if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
+      if (limited(`report:${idKey}`, 10) || limited('report-ip:' + who, 10)) return json({ error: CHAT_LINES.limit }, 429);
+      try {
+        // One database call counts the report: one per reporter, none for your own message, removal at 3 distinct reporters.
+        const { data, error } = await admin().rpc('report_chat', { p_id: mid, p_reporter: idKey });
+        if (error) throw error;
+        return json({ ok: true, removed: data === true });
+      } catch (e) {
+        console.error('[chat:report]', e);
+        return json({ error: 'Could not send the report' }, 500);
+      }
+    }
+
+    const key = String(body.key ?? '').trim().slice(0, 80);
+    if (!key) return json({ error: 'Missing key' }, 400);
+    if (cooldown(`chat:${idKey}`, 2000)) return json({ error: CHAT_LINES.slow }, 429);
+    if (limited(`chat:${idKey}`, 30) || limited('chat-ip:' + who, 60)) return json({ error: CHAT_LINES.limit }, 429);
+    const checked = checkMessage(String(body.text ?? ''));
+    if (!checked.ok) return json({ error: checked.reason }, 422);
+    // Moderation never switches off. Chat has its own daily budget (AI_CHAT_BUDGET_USD) so a spam wave cannot starve or
+    // outlast it; over that budget, a broken meter, or a failing moderator all mean "the chat is resting": nothing is posted.
+    if (!(await chatBudgetLeft())) return json({ error: CHAT_LINES.resting }, 503);
+    try {
+      const verdict = await meter('chat', (onUsage) => moderateChat(checked.text, onUsage));
+      if (!verdict.allowed) return json({ error: CHAT_LINES.moderated }, 422);
+    } catch (e) {
+      console.error('[chat:moderate]', e);
+      return json({ error: CHAT_LINES.busy }, 503);
+    }
+    try {
+      const db = admin();
+      const { data, error } = await db
+        .from('chat_messages')
+        .insert({ sender_key: key, login: id.github, tier: id.tier, body: checked.text })
+        .select('id,at,sender_key,login,tier,body')
+        .single();
+      if (error || !data) throw error ?? new Error('no row');
+      // The identity key sits in its own table: Realtime sends whole rows, and anon must not see it.
+      const { error: senderErr } = await db.from('chat_senders').insert({ message_id: data.id, sender_id: idKey });
+      if (senderErr) {
+        await db.from('chat_messages').delete().eq('id', data.id); // never leave a message nobody can be held to
+        throw senderErr;
+      }
+      return json(data);
+    } catch (e) {
+      console.error('[chat]', e);
+      return json({ error: 'Could not post your message' }, 500);
+    }
+  }
+
+  // --- admin: delete a chat message for good (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
+  if (path === 'chat/delete' && req.method === 'POST') {
+    if (limited('delete-ip:' + who, 20)) return json({ error: CHAT_LINES.limit }, 429); // counts wrong tokens too
+    const secret = env('ADMIN_TOKEN');
+    if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const mid = Number(body.id);
+    if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
+    const { error } = await admin().from('chat_messages').delete().eq('id', mid);
+    return error ? json({ error: 'Could not delete the message' }, 500) : json({ ok: true });
   }
 
   return json({ error: 'Not found' }, 404);

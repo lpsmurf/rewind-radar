@@ -7,6 +7,8 @@ import ClerkDrawer from './ui/ClerkDrawer';
 import SubmitModal from './ui/SubmitModal';
 import ProposalsBoard from './ui/ProposalsBoard';
 import ProposeModal from './ui/ProposeModal';
+import ArcadePanel from './ui/ArcadePanel';
+import ChatPanel from './ui/ChatPanel';
 import { BigQR, JoinCard } from './ui/JoinQR';
 
 export default function App() {
@@ -17,6 +19,7 @@ export default function App() {
   const [submitInitial, setSubmitInitial] = useState<{ title: string; url: string; note: string } | undefined>();
   const [proposeOpen, setProposeOpen] = useState(false);
   const [qrOpen, setQrOpen] = useState(false);
+  const [arcadeOpen, setArcadeOpen] = useState(false);
 
   // Presenter shortcut: press Q to toggle the big QR (ignored while typing).
   useEffect(() => {
@@ -58,11 +61,15 @@ export default function App() {
             tapes={s.tapes}
             visitors={s.visitors}
             me={s.me}
+            chat={s.chat}
+            meKey={s.meKey}
             highlighted={s.highlighted}
             top10={s.top10}
             onTapeClick={setOpen}
             onCounterClick={() => setClerkOpen(true)}
             onAisleChange={s.setAisle}
+            onMove={s.move}
+            onCabinetClick={() => setArcadeOpen(true)}
           />
         </section>
         <aside className="side">
@@ -75,6 +82,7 @@ export default function App() {
               ))}
             </ol>
           </div>
+          <ChatPanel chat={s.chat} meKey={s.meKey} github={s.github} member={s.member} onSend={s.sendChat} onReport={s.reportChat} onConnect={() => setClerkOpen(true)} />
           <ProposalsBoard proposals={s.proposals} onBack={s.backProposal} onPropose={() => setProposeOpen(true)} />
           <div className="panel">
             <h3>RINGS</h3>
@@ -88,6 +96,7 @@ export default function App() {
       {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} github={s.github} onForget={s.forgetGithub} tapes={s.tapes} onShelve={onShelve} member={s.member} canSignIn={s.canSignIn} onConnect={s.connectGithub} onSignIn={s.signIn} onSignOut={s.signOut} />}
       {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} initial={submitInitial} />}
       {proposeOpen && <ProposeModal onClose={() => setProposeOpen(false)} propose={s.propose} />}
+      {arcadeOpen && <ArcadePanel proposals={s.proposals} onBack={s.backProposal} onPropose={s.propose} handle={s.me.name} onClose={() => setArcadeOpen(false)} />}
       {qrOpen && <BigQR inStore={s.visitors.length + 1} onClose={() => setQrOpen(false)} />}
       {s.toast && <div className="toast">{s.toast}</div>}
     </div>

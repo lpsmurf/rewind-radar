@@ -25,6 +25,7 @@ vi.mock('../lib/github.ts', async (orig) => {
 
 import { handle } from '../lib/routes.ts';
 import { CLERK_LINES } from '../lib/clerkGuard.ts';
+import { CHAT_LINES } from '../lib/chatGuard.ts';
 import { costUsd, HAIKU, SONNET } from '../lib/ai.ts';
 import { githubMember, SAMPLE } from './helpers/samples.ts';
 
@@ -39,7 +40,7 @@ let ips = 0;
 /** Clerk calls get a fresh light visitor (own username, so its bucket never fills) unless the test sets `github` or a Bearer token. */
 let shoppers = 0;
 const post = async (path: string, body: Record<string, unknown>, xff: string = `10.0.0.${++ips}`, extra: Record<string, string> = {}) => {
-  if (path === 'clerk' && !('github' in body) && !extra.authorization) body = { ...body, github: `shopper-${++shoppers}` };
+  if ((path === 'clerk' || path === 'chat' || path === 'chat/report') && !('github' in body) && !extra.authorization) body = { ...body, github: `shopper-${++shoppers}` };
   const r = await handle(new Request('http://localhost/api/' + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': xff, ...extra }, body: JSON.stringify(body) }));
   return { status: r.status, body: (await r.json()) as any };
 };
@@ -747,5 +748,303 @@ describe('a global ceiling on clerk Anthropic calls', () => {
     const r = await ask();
     expect(r.body).toEqual({ answer: CLERK_LINES.free, slugs: ['diagram-design'], aisle: 'Design' });
     expect(create).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('visitor chat', () => {
+  const bearer = (t: string) => ({ authorization: `Bearer ${t}` });
+  const KEY = 'visitor-abc.tab-1';
+  const insertsOf = (d: any) => d.calls('chat_messages').filter((q: Query) => has(q, 'insert')).map((q: Query) => arg(q, 'insert'));
+  const deletesOf = (d: any) => d.calls('chat_messages').filter((q: Query) => has(q, 'delete')).map((q: Query) => q.calls.find((c) => c[0] === 'eq')!.slice(1));
+  const sendersOf = (d: any) => d.calls('chat_senders').filter((q: Query) => has(q, 'insert')).map((q: Query) => arg(q, 'insert'));
+  const usageOf = (d: any) => d.calls('ai_usage').filter((q: Query) => has(q, 'insert')).map((q: Query) => arg(q, 'insert'));
+  const ok = () => create.mockResolvedValue(toolReply('moderate_chat', { allowed: true, reason: '' }));
+  const say = (text: string, o: { github?: string; key?: string; ip?: string; headers?: Record<string, string> } = {}) =>
+    post('chat', { text, key: o.key ?? KEY, ...(o.github === undefined ? {} : { github: o.github }) }, o.ip, o.headers);
+
+  function chatSetup(o: { spent?: number; chatSpent?: number | 'error' } = {}) {
+    const d = setup({ spent: o.spent });
+    d.on('rpc:chat_spend_today', () => (o.chatSpent === 'error' ? { data: null, error: { message: 'boom' } } : { data: o.chatSpent ?? 0, error: null }));
+    d.on('chat_messages', (q: Query) => {
+      if (has(q, 'insert')) return { data: { id: 7, at: '2026-11-05T10:00:00Z', ...arg(q, 'insert') }, error: null };
+      return { data: null, error: null };
+    });
+    return d;
+  }
+
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
+
+  describe('POST /chat', () => {
+    it('turns a guest away with 401 before any limit, check, AI call or database call', async () => {
+      const d = chatSetup();
+      const r = await post('chat', { text: 'hello', key: KEY, github: undefined });
+      expect(r).toEqual({ status: 401, body: { error: CHAT_LINES.gate, gate: 'github' } });
+      expect((await say('hello', { github: 'ghost-writer' })).status).toBe(401);
+      expect((await post('chat', { text: 'hello', key: KEY, github: undefined }, undefined, bearer('bad'))).status).toBe(401);
+      expect(create).not.toHaveBeenCalled();
+      expect(d.queries).toHaveLength(0);
+    });
+
+    it('refuses with 503 when GitHub cannot confirm the name', async () => {
+      chatSetup();
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect((await say('hello', { github: 'outage-user' })).status).toBe(503);
+    });
+
+    it('allows one message per 2 seconds per identity', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      chatSetup();
+      ok();
+      expect((await say('first', { github: 'cooldown-user' })).status).toBe(200);
+      const r = await say('second', { github: 'cooldown-user' });
+      expect(r).toEqual({ status: 429, body: { error: CHAT_LINES.slow } });
+      expect((await say('someone else', { github: 'other-user' })).status).toBe(200);
+      vi.advanceTimersByTime(2100);
+      expect((await say('third', { github: 'cooldown-user' })).status).toBe(200);
+    });
+
+    it('allows 30 messages per hour per identity', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      chatSetup();
+      ok();
+      for (let i = 0; i < 30; i++) {
+        expect((await say(`message ${i}`, { github: 'chatty-user', ip: '10.9.0.1' })).status).toBe(200);
+        vi.advanceTimersByTime(2100);
+      }
+      expect(await say('one too many', { github: 'chatty-user', ip: '10.9.0.1' })).toEqual({ status: 429, body: { error: CHAT_LINES.limit } });
+      vi.advanceTimersByTime(3600_000);
+      expect((await say('later', { github: 'chatty-user', ip: '10.9.0.1' })).status).toBe(200);
+    });
+
+    it('allows 60 messages per hour per IP, across identities', async () => {
+      chatSetup();
+      ok();
+      for (let i = 0; i < 60; i++) expect((await say(`message ${i}`, { github: `ip-user-${i}`, ip: '10.9.0.2' })).status).toBe(200);
+      expect(await say('one too many', { github: 'ip-user-new', ip: '10.9.0.2' })).toEqual({ status: 429, body: { error: CHAT_LINES.limit } });
+      expect((await say('other ip', { github: 'ip-user-fresh', ip: '10.9.0.3' })).status).toBe(200);
+    });
+
+    it('rejects a message that fails the free checks, without moderation or insert', async () => {
+      const d = chatSetup();
+      const r = await say('buy at https://evil.example/x');
+      expect(r).toEqual({ status: 422, body: { error: CHAT_LINES.link } });
+      expect((await say('12345')).status).toBe(422);
+      expect(create).not.toHaveBeenCalled();
+      expect(insertsOf(d)).toHaveLength(0);
+      expect(usageOf(d)).toHaveLength(0);
+    });
+
+    it('does not post a message the moderator blocks (and still records what the call cost)', async () => {
+      const d = chatSetup();
+      create.mockResolvedValue(toolReply('moderate_chat', { allowed: false, reason: 'abuse' }));
+      const r = await say('you are all losers');
+      expect(r).toEqual({ status: 422, body: { error: CHAT_LINES.moderated } });
+      expect(insertsOf(d)).toHaveLength(0);
+      expect(usageOf(d)).toMatchObject([{ route: 'chat', model: HAIKU }]);
+    });
+
+    it('posts an allowed message as the identity, with only the public fields stored and returned', async () => {
+      const d = chatSetup();
+      ok();
+      const r = await say('  hello   world ', { github: 'lpsmurf', key: 'k'.repeat(120) });
+      expect(r.status).toBe(200);
+      expect(r.body).toEqual({ id: 7, at: '2026-11-05T10:00:00Z', sender_key: 'k'.repeat(80), login: 'lpsmurf', tier: 'light', body: 'hello world' });
+      expect(insertsOf(d)).toEqual([{ sender_key: 'k'.repeat(80), login: 'lpsmurf', tier: 'light', body: 'hello world' }]);
+      expect(sendersOf(d)).toEqual([{ message_id: 7, sender_id: 'gh:lpsmurf' }]); // the identity key lives apart from the public row
+      expect(d.calls('chat_messages')[0].calls.find((c: any) => c[0] === 'select')?.[1]).toBe('id,at,sender_key,login,tier,body');
+      expect(create.mock.calls[0][0].model).toBe(HAIKU);
+      expect(create.mock.calls[0][0].messages[0].content).toContain('hello world');
+    });
+
+    it('records the moderation call as route "chat"', async () => {
+      const d = chatSetup();
+      ok();
+      await say('hello');
+      expect(usageOf(d)).toMatchObject([{ route: 'chat', model: HAIKU, input_tokens: 1000, output_tokens: 200 }]);
+    });
+
+    it('takes the name from a verified GitHub login, not from the body', async () => {
+      const d = chatSetup();
+      d.tokens.tok = githubMember('octo');
+      ok();
+      const r = await post('chat', { text: 'hi there', key: KEY, github: 'someone-else' }, undefined, bearer('tok'));
+      expect(r.status).toBe(200);
+      expect(insertsOf(d)).toEqual([{ sender_key: KEY, login: 'octo', tier: 'member', body: 'hi there' }]);
+      expect(sendersOf(d)).toEqual([{ message_id: 7, sender_id: 'm:uid-octo' }]);
+    });
+
+    // Flipped on purpose: this used to post on the free checks alone when the budget ran out. That meant a
+    // spam wave could drain the budget and then post unmoderated, so moderation now never switches off:
+    // chat has its own daily budget, and without it (or without a working meter) nothing is posted.
+    it('over the chat budget it rests: 503, nothing posted, no moderation call', async () => {
+      const d = chatSetup({ chatSpent: 0.5 });
+      const r = await say('hello from the free tier');
+      expect(r).toEqual({ status: 503, body: { error: CHAT_LINES.resting } });
+      expect(create).not.toHaveBeenCalled();
+      expect(insertsOf(d)).toHaveLength(0);
+    });
+
+    it('with a broken chat spend meter it rests too (fails closed)', async () => {
+      const d = chatSetup({ chatSpent: 'error' });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect((await say('hello')).status).toBe(503);
+      expect(create).not.toHaveBeenCalled();
+      expect(insertsOf(d)).toHaveLength(0);
+    });
+
+    it('the chat budget is its own: AI_CHAT_BUDGET_USD (default 0.5), and the global budget does not switch chat off', async () => {
+      const d = chatSetup({ spent: 99, chatSpent: 0.49 });
+      ok();
+      expect((await say('hello')).status).toBe(200);
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(insertsOf(d)).toHaveLength(1);
+      vi.stubEnv('AI_CHAT_BUDGET_USD', '0.2');
+      expect((await say('hello again', { github: 'budget-two' })).status).toBe(503);
+      vi.stubEnv('AI_CHAT_BUDGET_USD', '1');
+      expect((await say('hello once more', { github: 'budget-three' })).status).toBe(200);
+    });
+
+    it('still applies the free checks when resting (they run first, for free)', async () => {
+      chatSetup({ chatSpent: 9 });
+      expect((await say('https://evil.example')).status).toBe(422);
+    });
+
+    it('answers 503 and posts nothing when moderation throws', async () => {
+      const d = chatSetup();
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      create.mockRejectedValueOnce(new Error('anthropic down'));
+      const r = await say('hello');
+      expect(r).toEqual({ status: 503, body: { error: CHAT_LINES.busy } });
+      expect(insertsOf(d)).toHaveLength(0);
+    });
+
+    it('needs a presence key', async () => {
+      const d = chatSetup();
+      expect((await say('hello', { key: '' })).status).toBe(400);
+      expect(insertsOf(d)).toHaveLength(0);
+    });
+
+    it('removes the message again when its sender row cannot be saved', async () => {
+      const d = chatSetup();
+      d.on('chat_senders', () => ({ data: null, error: { message: 'boom' } }));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      ok();
+      expect((await say('hello')).status).toBe(500);
+      expect(deletesOf(d)).toEqual([['id', 7]]);
+    });
+
+    it('answers 500 when the insert fails', async () => {
+      const d = chatSetup();
+      d.on('chat_messages', () => ({ data: null, error: { message: 'boom' } }));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      ok();
+      expect((await say('hello')).status).toBe(500);
+    });
+  });
+
+  describe('POST /chat/report', () => {
+    const report = (id: unknown, o: { github?: string; ip?: string; headers?: Record<string, string> } = {}) =>
+      post('chat/report', { id, ...(o.github === undefined ? {} : { github: o.github }) }, o.ip, o.headers);
+    const rpcCalls = (d: any) => d.calls('rpc:report_chat').map((q: Query) => arg(q, 'args'));
+    const withRpc = (removed = false) => {
+      const d = chatSetup();
+      d.on('rpc:report_chat', () => ({ data: removed, error: null }));
+      return d;
+    };
+
+    it('is closed to guests', async () => {
+      const d = withRpc();
+      const r = await post('chat/report', { id: 1, github: undefined });
+      expect(r).toEqual({ status: 401, body: { error: CHAT_LINES.gate, gate: 'github' } });
+      expect(d.queries).toHaveLength(0);
+    });
+
+    it('hands the report to the database with the identity key as reporter', async () => {
+      const d = withRpc(false);
+      const r = await report(5, { github: 'Reporter-A' });
+      expect(r).toEqual({ status: 200, body: { ok: true, removed: false } });
+      expect(rpcCalls(d)).toEqual([{ p_id: 5, p_reporter: 'gh:reporter-a' }]);
+    });
+
+    it('reports a member by user id and tells the client when the message was removed (3rd distinct reporter)', async () => {
+      const d = withRpc(true);
+      d.tokens.tok = githubMember('octo', 'uid-7');
+      const r = await post('chat/report', { id: 5 }, undefined, bearer('tok'));
+      expect(r.body).toEqual({ ok: true, removed: true });
+      expect(rpcCalls(d)).toEqual([{ p_id: 5, p_reporter: 'm:uid-7' }]);
+    });
+
+    it('fails with 500 when the database call fails', async () => {
+      const d = chatSetup();
+      d.on('rpc:report_chat', () => ({ data: null, error: { message: 'boom' } }));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect((await report(5)).status).toBe(500);
+    });
+
+    it('allows 10 reports per hour per identity', async () => {
+      withRpc();
+      for (let i = 1; i <= 10; i++) expect((await report(i, { github: 'reporter-c', ip: `10.8.${i}.1` })).status).toBe(200);
+      expect((await report(11, { github: 'reporter-c', ip: '10.8.99.1' })).status).toBe(429);
+    });
+
+    it('allows 10 reports per hour per IP, across identities', async () => {
+      withRpc();
+      for (let i = 1; i <= 10; i++) expect((await report(i, { github: `ip-reporter-${i}`, ip: '10.8.0.9' })).status).toBe(200);
+      expect((await report(11, { github: 'ip-reporter-new', ip: '10.8.0.9' })).status).toBe(429);
+      expect((await report(11, { github: 'ip-reporter-new', ip: '10.8.0.10' })).status).toBe(200);
+    });
+
+    it('400s a bad id', async () => {
+      const d = withRpc();
+      expect((await report('abc')).status).toBe(400);
+      expect((await report(-1)).status).toBe(400);
+      expect(d.calls('rpc:report_chat')).toHaveLength(0);
+    });
+  });
+
+  describe('POST /chat/delete (admin)', () => {
+    const del = (token: string | undefined, id: unknown = 5) =>
+      post('chat/delete', { id }, undefined, token === undefined ? {} : { 'x-admin-token': token });
+
+    it('deletes the message for the right token', async () => {
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      const d = chatSetup();
+      expect((await del('sesame-open')).status).toBe(200);
+      expect(deletesOf(d)).toEqual([['id', 5]]); // a hard delete, so Realtime tells everyone
+    });
+
+    it('refuses a wrong token and a missing token', async () => {
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      const d = chatSetup();
+      expect((await del('sesame-closed')).status).toBe(403);
+      expect((await del('sesame')).status).toBe(403);
+      expect((await del('')).status).toBe(403);
+      expect((await del(undefined)).status).toBe(403);
+      expect(deletesOf(d)).toHaveLength(0);
+    });
+
+    it('is always forbidden when ADMIN_TOKEN is not set', async () => {
+      vi.stubEnv('ADMIN_TOKEN', '');
+      const d = chatSetup();
+      expect((await del('')).status).toBe(403);
+      expect((await del('undefined')).status).toBe(403);
+      expect((await del(undefined)).status).toBe(403);
+      expect(deletesOf(d)).toHaveLength(0);
+    });
+
+    it('allows 20 attempts per hour per IP, wrong tokens included (so guessing is slow)', async () => {
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      chatSetup();
+      const at = (ip: string, token: string) => post('chat/delete', { id: 5 }, ip, { 'x-admin-token': token });
+      for (let i = 0; i < 20; i++) expect((await at('10.7.0.1', 'wrong')).status).toBe(403);
+      expect((await at('10.7.0.1', 'sesame-open')).status).toBe(429);
+      expect((await at('10.7.0.2', 'sesame-open')).status).toBe(200);
+    });
+
+    it('400s a bad id', async () => {
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      chatSetup();
+      expect((await del('sesame-open', 'x')).status).toBe(400);
+    });
   });
 });
