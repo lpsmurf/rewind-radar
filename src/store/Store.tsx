@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { Tape, Visitor, Aisle, Room as RoomId } from '../types';
-import { GENRES, aisleOf, latestWeek, roomOfTape, RING_COLORS, PALETTE as P } from '../types';
+import { GENRES, aisleOf, latestWeek, RING_COLORS, PALETTE as P } from '../types';
 import {
   ARCADE_CABINETS, ARCADE_EXIT, ARCADE_SPAWN, BH, BW, CABINET_TOP, DOOR, H, REPOS_DOOR, W,
   bx, by, clampToFloor, doorAt, findPath, inRect, keyVector, lerpRemote, spawnFor, stepBy, stepToward,
@@ -8,7 +8,7 @@ import {
 } from './movement';
 import { activeBubble, bubbleLines, type ChatEntry } from './chat';
 import { MONTHLY_PLACEHOLDER } from './monthly';
-import { weeklyReleases } from './rooms';
+import { standTapes, weeklyReleases } from './rooms';
 import { formatStars } from '../lib/stars';
 import { drawPixelText, drawStarCount, drawStarCountAt, ellipsize, starCountWidth, textWidth } from './pixelText';
 import { TV_RECT, WALL_SHELVES, wallSlot, wallSplit, type WallShelf } from './wall';
@@ -317,7 +317,7 @@ export default function Store(props: StoreProps) {
         // genre aisles
         GENRES.forEach((gn, i) => {
           const x = bx(i), y = by(i);
-          const list = (by_[gn] ?? []).filter((t) => roomOfTape(t) === room);
+          const list = standTapes(p.tapes, gn, room);
           const cap = Math.floor((BW - 4) / 3);
           list.slice(0, cap * 2).forEach((t, k) => {
             const lv = k < cap ? 0 : 1, j = k % cap;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { aisleOf, roomOfKind, roomOfTape, placeOf } from '../src/types.ts';
-import { clerkDestination, communityShelf, roomForAisle, weeklyReleases } from '../src/store/rooms.ts';
+import { clerkDestination, communityShelf, roomForAisle, standTapes, weeklyReleases } from '../src/store/rooms.ts';
 import { tapeFixture } from './helpers/tapes.ts';
 
 describe('roomOfKind / roomOfTape', () => {
@@ -86,5 +86,27 @@ describe('communityShelf', () => {
     const b = tapeFixture({ id: 'b', kind: 'repo' });
     const c = tapeFixture({ id: 'c', kind: 'community' });
     expect(communityShelf([a, b, c]).map((t) => t.id)).toEqual(['a', 'c']);
+  });
+});
+
+describe('standTapes (what a genre stand holds)', () => {
+  const week = '2026-11-02';
+  const skill = tapeFixture({ id: 's', kind: 'skill', genre: 'Design' });
+  const memory = tapeFixture({ id: 'm', kind: 'memory', genre: 'Design' });
+  const thisWeek = tapeFixture({ id: 'r1', kind: 'repo', genre: 'Design', week });
+  const older = tapeFixture({ id: 'r2', kind: 'repo', genre: 'Design', week: '2026-10-26' });
+  const community = tapeFixture({ id: 'c', kind: 'community', genre: 'Design' });
+  const other = tapeFixture({ id: 'x', kind: 'repo', genre: 'Media', week });
+  const all = [skill, memory, thisWeek, older, community, other];
+  it('the repos room holds every repo and community tape of the genre, this week included', () => {
+    expect(standTapes(all, 'Design', 'repos').map((t) => t.id)).toEqual(['r1', 'r2', 'c']);
+    expect(standTapes(all, 'Media', 'repos').map((t) => t.id)).toEqual(['x']);
+  });
+  it('the skills room holds only skills', () => {
+    expect(standTapes(all, 'Design', 'store').map((t) => t.id)).toEqual(['s', 'm']);
+    expect(standTapes(all, 'Media', 'store')).toEqual([]);
+  });
+  it('the arcade has no stands', () => {
+    expect(standTapes(all, 'Design', 'arcade')).toEqual([]);
   });
 });

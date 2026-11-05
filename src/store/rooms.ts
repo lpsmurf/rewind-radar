@@ -1,6 +1,6 @@
 // Pure room routing: which room a place is in, where the clerk sends you, and the weekly shelf order.
-import type { Aisle, Room, Tape } from '../types';
-import { aisleOf, latestWeek, placeOf } from '../types';
+import type { Aisle, Genre, Room, Tape } from '../types';
+import { aisleOf, latestWeek, placeOf, roomOfTape } from '../types';
 
 /** The room I end up in for an aisle. The arcade is its own room; an explicit room wins; else I stay (the arcade lands in skills). */
 export function roomForAisle(aisle: Aisle, explicit: Room | undefined, current: Room): Room {
@@ -28,3 +28,7 @@ export function weeklyReleases(tapes: Tape[]): Tape[] {
 
 /** The COMMUNITY PICKS shelf, in the order the tapes were loaded. */
 export const communityShelf = (tapes: Tape[]): Tape[] => tapes.filter((t) => t.kind === 'community');
+
+/** A genre stand's tapes: the room's own kinds of that genre. The REPOS stands keep this week's repos too (the wall shows them as well). */
+export const standTapes = (tapes: Tape[], genre: Genre, room: Room): Tape[] =>
+  room === 'arcade' ? [] : tapes.filter((t) => t.genre === genre && roomOfTape(t) === room);
