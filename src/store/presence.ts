@@ -32,3 +32,66 @@ export function visitorsFromPresence(
       } as Visitor;
     });
 }
+
+/** Wait before reconnect attempt n (0-based): 1 s, 2 s, 4 s ... capped at 30 s. */
+export const backoffMs = (attempt: number): number => Math.min(30_000, 1000 * 2 ** Math.max(0, attempt));
+
+export interface PresencePayload { name: string; color: string; room: 'store' | 'arcade'; x?: number; y?: number }
+
+/** The server closes a channel that tracks more than about 5 times in 30 s, so only presence-worthy changes go out. */
+const sigOf = (p: PresencePayload) => `${p.room}|${p.name}|${p.color}`;
+
+export interface TrackGateOpts {
+  minMs?: number;
+  now?: () => number;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (h: any) => void;
+}
+
+/**
+ * Decides when to call track(). A room change goes out at once. Name or colour changes are deduped and sent at
+ * most once per `minMs`, with a trailing send so the final value always arrives. Position alone never counts.
+ */
+export function createTrackGate(send: (p: PresencePayload) => void, o: TrackGateOpts = {}) {
+  const minMs = o.minMs ?? 8000;
+  const now = o.now ?? Date.now;
+  const setTimer = o.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearTimer = o.clearTimer ?? ((h) => clearTimeout(h));
+  let last: PresencePayload | null = null;
+  let lastAt = 0;
+  let pending: PresencePayload | null = null;
+  let timer: unknown = null;
+
+  const stop = () => {
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+    pending = null;
+  };
+  const fire = (p: PresencePayload) => {
+    stop();
+    last = p;
+    lastAt = now();
+    send(p);
+  };
+
+  return {
+    update(p: PresencePayload) {
+      if (last && sigOf(p) === sigOf(last)) return stop(); // back to what was sent: nothing to say
+      if (!last || p.room !== last.room || now() - lastAt >= minMs) return fire(p);
+      pending = p;
+      if (timer === null) {
+        timer = setTimer(() => {
+          timer = null;
+          const q = pending;
+          pending = null;
+          if (q) fire(q);
+        }, Math.max(0, lastAt + minMs - now()));
+      }
+    },
+    /** Send now whatever the state (a fresh channel has no presence yet). */
+    force(p: PresencePayload) {
+      fire(p);
+    },
+    cancel: stop,
+  };
+}

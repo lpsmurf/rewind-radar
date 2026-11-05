@@ -8,7 +8,7 @@ import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './cle
 import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
 import { createSendGate } from '../store/movement';
 import { acceptMove, rememberPos } from '../store/remote';
-import { visitorsFromPresence } from '../store/presence';
+import { backoffMs, createTrackGate, visitorsFromPresence, type PresencePayload } from '../store/presence';
 import { deletedId, mergeChat, removeChat, type ChatEntry, type ChatMsg } from '../store/chat';
 
 const CHAT_COLS = 'id,at,sender_key,login,tier,body';
@@ -52,6 +52,11 @@ export function useStore() {
   memberRef.current = member;
   const chanRef = useRef<ReturnType<NonNullable<typeof sb>['channel']> | null>(null);
   const toastTimer = useRef<number>();
+  const subscribedRef = useRef(false); // broadcasts only go out on a joined channel; send() would fall back to REST
+  const presenceRef = useRef<PresencePayload>({ name: meRef.current.name, color: meRef.current.color, room: 'store' });
+  const gateRef2 = useRef(createTrackGate((p) => {
+    if (subscribedRef.current) chanRef.current?.track({ ...p, ...posRef.current });
+  }));
 
   const say = useCallback((m: string) => {
     setToast(m);
@@ -94,6 +99,9 @@ export function useStore() {
       if (!dead) setChat((cur) => mergeChat(cur, ((cr.data ?? []) as ChatMsg[]).slice().reverse(), 0));
     })();
 
+    let attempt = 0;
+    let retry: number | undefined;
+    const connect = () => {
     const ch = c.channel('store', { config: { presence: { key: keyRef.current } } });
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'votes' }, (p: any) => {
       if (p.new?.visitor_id === meRef.current.id) return; // our own vote was already counted optimistically
@@ -150,16 +158,30 @@ export function useStore() {
       setVisitors(next);
     });
     ch.subscribe((status: string) => {
+      if (dead || chanRef.current !== ch) return; // a channel we already replaced or tore down
       if (status === 'SUBSCRIBED') {
+        attempt = 0;
+        subscribedRef.current = true;
         setLive(true);
-        const m = meRef.current;
-        ch.track({ name: m.name, color: m.color, aisle: 'entrance', ...posRef.current });
+        gateRef2.current.force(presenceRef.current); // a fresh channel has no presence yet
+      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+        subscribedRef.current = false;
+        setLive(false);
+        c.removeChannel(ch);
+        chanRef.current = null;
+        window.clearTimeout(retry);
+        retry = window.setTimeout(connect, backoffMs(attempt++));
       }
     });
     chanRef.current = ch;
+    };
+    connect();
     return () => {
       dead = true;
-      c.removeChannel(ch);
+      window.clearTimeout(retry);
+      gateRef2.current.cancel();
+      subscribedRef.current = false;
+      if (chanRef.current) c.removeChannel(chanRef.current);
       chanRef.current = null;
       setLive(false);
     };
@@ -168,14 +190,17 @@ export function useStore() {
   const setAisle = useCallback((a: Aisle) => {
     setAisleState(a);
     const m = meRef.current;
-    chanRef.current?.track({ name: m.name, color: m.color, aisle: a, ...posRef.current });
+    // Only the room is presence: tracking per aisle trips the server's rate limit and closes the channel.
+    const next: PresencePayload = { name: m.name, color: m.color, room: a === 'arcade' ? 'arcade' : 'store' };
+    presenceRef.current = next;
+    gateRef2.current.update(next);
   }, []);
 
   /** Broadcast my position (throttled to about 8/s). `force` is for the last step and for entering a room. */
   const move = useCallback((x: number, y: number, force = false) => {
     posRef.current = { x: Math.round(x), y: Math.round(y) };
     const ch = chanRef.current;
-    if (!ch || !gateRef.current(performance.now(), force)) return;
+    if (!ch || !subscribedRef.current || !gateRef.current(performance.now(), force)) return;
     ch.send({ type: 'broadcast', event: 'move', payload: { key: keyRef.current, ...posRef.current } });
   }, []);
 

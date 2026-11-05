@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { visitorsFromPresence } from '../src/store/presence.ts';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { backoffMs, createTrackGate, visitorsFromPresence, type PresencePayload } from '../src/store/presence.ts';
 import { H, W } from '../src/store/movement.ts';
 import { staleThenFresh } from './helpers/presence.ts';
 
@@ -27,5 +27,70 @@ describe('visitorsFromPresence', () => {
     expect(v.find((o) => o.id === 'a~1')!.aisle).toBe('arcade');
     expect(v.find((o) => o.id === 'c~1')!.aisle).toBe('entrance');
     expect(v.find((o) => o.id === 'b~1')!.name).toBe('GUEST');
+  });
+});
+
+describe('backoffMs', () => {
+  it('doubles from 1 s and caps at 30 s', () => {
+    expect([0, 1, 2, 3, 4, 5, 6, 20].map(backoffMs)).toEqual([1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+  });
+});
+
+describe('createTrackGate', () => {
+  let t = 0;
+  const sent: any[] = [];
+  const mk = () => createTrackGate((p) => sent.push(p), { minMs: 8000, now: () => t });
+  const p = (room: 'store' | 'arcade', extra = {}): PresencePayload => ({ name: 'N', color: '#fff', room, ...extra });
+  beforeEach(() => { vi.useFakeTimers(); t = 0; sent.length = 0; });
+  afterEach(() => vi.useRealTimers());
+  const wait = (ms: number) => { t += ms; vi.advanceTimersByTime(ms); };
+
+  it('sends the first update at once and drops an identical repeat', () => {
+    const g = mk();
+    g.update(p('store'));
+    g.update(p('store', { x: 5, y: 5 })); // position alone is not presence-worthy
+    expect(sent).toHaveLength(1);
+  });
+  it('sends a room change immediately', () => {
+    const g = mk();
+    g.update(p('store'));
+    wait(100);
+    g.update(p('arcade'));
+    expect(sent.map((s) => s.room)).toEqual(['store', 'arcade']);
+  });
+  it('coalesces a burst of name changes and sends the trailing value', () => {
+    const g = mk();
+    g.update(p('store'));
+    wait(100);
+    g.update(p('store', { name: 'A' }));
+    g.update(p('store', { name: 'B' }));
+    g.update(p('store', { name: 'C' }));
+    expect(sent).toHaveLength(1);
+    wait(8000);
+    expect(sent.map((s) => s.name)).toEqual(['N', 'C']);
+  });
+  it('sends nothing at the end when the burst settled back to what was sent', () => {
+    const g = mk();
+    g.update(p('store'));
+    wait(100);
+    g.update(p('store', { name: 'A' }));
+    g.update(p('store'));
+    wait(9000);
+    expect(sent).toHaveLength(1);
+  });
+  it('force re-sends the latest value (a fresh channel has no presence)', () => {
+    const g = mk();
+    g.update(p('arcade'));
+    g.force(p('arcade'));
+    expect(sent).toHaveLength(2);
+  });
+  it('cancel stops a pending trailing send', () => {
+    const g = mk();
+    g.update(p('store'));
+    wait(100);
+    g.update(p('store', { name: 'A' }));
+    g.cancel();
+    wait(9000);
+    expect(sent).toHaveLength(1);
   });
 });
