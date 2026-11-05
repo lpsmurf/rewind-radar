@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import Store from './store/Store';
 import { useStore } from './lib/useStore';
 import { RING_COLORS, type Assessment, type RepoSummary, type Tape } from './types';
@@ -11,7 +11,6 @@ import ProposalsBoard from './ui/ProposalsBoard';
 import ProposeModal from './ui/ProposeModal';
 import ArcadePanel from './ui/ArcadePanel';
 import ChatPanel from './ui/ChatPanel';
-import { BigQR, JoinCard } from './ui/JoinQR';
 
 export default function App() {
   const s = useStore();
@@ -21,19 +20,8 @@ export default function App() {
   const [submitOpen, setSubmitOpen] = useState(false);
   const [submitInitial, setSubmitInitial] = useState<{ title: string; url: string; note: string } | undefined>();
   const [proposeOpen, setProposeOpen] = useState(false);
-  const [qrOpen, setQrOpen] = useState(false);
   const [arcadeOpen, setArcadeOpen] = useState(false);
 
-  // Presenter shortcut: press Q to toggle the big QR (ignored while typing).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement;
-      if (el.closest('input, textarea, select, [contenteditable]') || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === 'q' || e.key === 'Q') setQrOpen((v) => !v);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
   const cur = open ? s.tapes.find((t) => t.id === open.id) ?? open : null;
   // The weekly and monthly shelves open the full-screen browser over their own list; any other tape opens the panel.
   const onTapeClick = (t: Tape, source?: 'weekly' | 'monthly') => {
@@ -62,7 +50,6 @@ export default function App() {
           <button className="btn" onClick={() => setClerkOpen(true)}>ASK THE CLERK</button>
           <button className="btn alt" onClick={() => openSubmit()}>SUBMIT YOUR PROJECT</button>
           <button className="btn" onClick={() => setProposeOpen(true)}>PROPOSE AN IDEA</button>
-          <button className="btn alt" onClick={() => setQrOpen(true)}>SHOW QR</button>
         </div>
       </header>
       <main>
@@ -84,7 +71,6 @@ export default function App() {
           />
         </section>
         <aside className="side">
-          <JoinCard onShowBig={() => setQrOpen(true)} />
           <div className="panel">
             <h3>TOP 10 THIS WEEK</h3>
             <ol className="top">
@@ -109,7 +95,6 @@ export default function App() {
       {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} initial={submitInitial} />}
       {proposeOpen && <ProposeModal onClose={() => setProposeOpen(false)} propose={s.propose} />}
       {arcadeOpen && <ArcadePanel proposals={s.proposals} onBack={s.backProposal} onPropose={s.propose} handle={s.me.name} onClose={() => setArcadeOpen(false)} />}
-      {qrOpen && <BigQR inStore={s.visitors.length + 1} onClose={() => setQrOpen(false)} />}
       {s.toast && <div className="toast">{s.toast}</div>}
     </div>
   );

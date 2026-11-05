@@ -10,7 +10,7 @@ Built at the Supabase × Anthropic hackathon (Nov 2026).
 - **Ask the clerk** (Claude Sonnet) for a tape, or **Scan my GitHub**: paste a user or repo and get a personal radar of skills + repos.
 - **Rent**: own skills copy a one-line install; third-party skills link to their original source (we don't republish other people's work).
 - **Vote** on tapes (live Top 10), **submit a project** (Claude reviews the repo), **propose an idea** in the Request Box and back others.
-- See other visitors as pixel avatars, live. Presenter mode: press **Q** for a full-screen join QR.
+- See other visitors as pixel avatars, live.
 
 ## Architecture
 | Part | Where |

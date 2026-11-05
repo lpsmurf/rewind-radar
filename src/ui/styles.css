@@ -63,18 +63,6 @@ fieldset{border:0;padding:0;margin:0}
 .small.dim { opacity: 0.7; }
 textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; resize: vertical; }
 
-/* Scan-to-join QR */
-.qr { line-height: 0; border: 4px solid #ffd200; box-shadow: 4px 4px 0 #061846; background: #fff6d5; }
-.qr svg { width: 100%; height: 100%; display: block; image-rendering: pixelated; shape-rendering: crispEdges; }
-.join { text-align: center; }
-.join .qrbtn { background: none; border: 0; padding: 0; margin: 4px auto 8px; display: inline-block; cursor: zoom-in; }
-.join .small { word-break: break-all; }
-.bigqr { z-index: 60; }
-.bigqr .panel { width: auto; max-width: 96vw; max-height: 96vh; overflow: visible; text-align: center; display: grid; justify-items: center; gap: 14px; padding: 28px 24px 22px; box-sizing: border-box; }
-.bigqr h2 { line-height: 1.5; padding: 0 28px; font-size: clamp(11px, 2.2vw, 22px); color: #ffd200; margin: 0; letter-spacing: 1px; }
-.bigqr .url { font-size: clamp(10px, 1.8vw, 16px); margin: 0; word-break: break-all; color: #fff6d5; }
-.bigqr .count { font-size: clamp(10px, 1.6vw, 14px); margin: 0; color: #3ddc84; }
-
 /* Clerk repo assessment card (inside the drawer log) */
 .ghnote { margin: 0 0 8px; }
 .gate { border: 2px dashed #1f4fbf; padding: 8px; display: grid; gap: 8px; }
