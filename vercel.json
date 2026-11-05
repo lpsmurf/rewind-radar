@@ -1,0 +1,3 @@
+{
+  "crons": [{ "path": "/api/radar/refresh", "schedule": "0 9 * * 1" }]
+}
