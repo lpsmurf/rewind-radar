@@ -16,9 +16,12 @@ The plan is in **docs/ROADMAP.md** (approved by Luis). It has six phases:
   - Ordinary questions run on Haiku 5.5 with an `on_topic` guardrail over full-text-search candidates.
   - Every route that calls Anthropic (clerk, assess, fit, profile, submit, propose, radar refresh) is metered in `ai_usage` and checked against `AI_DAILY_BUDGET_USD` (default $5/day). Over budget, the clerk answers from search only; profile/submit/propose answer 503 with an in-character line; the radar refresh skips.
   - Sonnet assessments also have a database-backed cap: `AI_ASSESS_MAX_PER_HOUR` (default 20) and `AI_ASSESS_BUDGET_USD` (default $2/day). /profile has its own: `AI_PROFILE_MAX_PER_HOUR` (default 30) and `AI_PROFILE_BUDGET_USD` (default $1/day). The defaults live in code, so no new secrets are needed.
-- **Tests:** `npm test` (Vitest, **147 tests**; Anthropic, GitHub and Supabase are mocked, and any unmocked fetch throws). Shared data lives in `test/helpers/`. Never import from another `*.test.ts`.
+  - Before each Sonnet call a placeholder `ai_usage` row is reserved at worst-case cost (`AI_ASSESS_RESERVE_USD` default 0.12, `AI_PROFILE_RESERVE_USD` default 0.06), then the caps are checked including every concurrent reservation, so bursts can be refused but never overshoot. The row is updated with the real cost afterwards.
+  - A repo that failed (or is being assessed) in the last 10 minutes is not assessed again: the stale row is served, or a 503 "still rewinding" line.
+  - `budgetLeft()` fails closed on every route: if the meter can't be read, nobody spends.
+- **Tests:** `npm test` (Vitest, **182 tests**; Anthropic, GitHub and Supabase are mocked, and any unmocked fetch throws). Shared data lives in `test/helpers/`. Never import from another `*.test.ts`.
 - **CI:** `.github/workflows/ci.yml` runs typecheck, test, build, sync-edge and `deno check`.
-- **Verified this session (2026-11-05):** `npm test` (147), `npx tsc --noEmit -p .`, `npm run build`, `bash scripts/sync-edge.sh && deno check supabase/functions/api/index.ts` all pass locally. Nothing has been run against the real Anthropic, GitHub or Supabase.
+- **Verified this session (2026-11-05):** `npm test` (182), `npx tsc --noEmit -p .`, `npm run build`, `bash scripts/sync-edge.sh && deno check supabase/functions/api/index.ts` all pass locally. Nothing has been run against the real Anthropic, GitHub or Supabase.
 
 ### Code-review findings: all 8 fixed (test-first, one commit each)
 1. **Budget bypass, fixed.** /profile, /submit, /propose and radar/refresh are budget-gated and metered through a shared `meter()` helper. /profile fails closed and has its own database cap.
