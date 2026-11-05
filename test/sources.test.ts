@@ -170,7 +170,7 @@ describe('manualSource and the registry', () => {
     const out = await src.run({ ...ctx(), onUsage: () => {} });
     expect(out).toEqual([{ repo: 'GitRoomHQ/Postiz-App', kind: 'repo' }]);
   });
-  it('exports the list that later slices register into', () => {
-    expect(Array.isArray(SOURCES)).toBe(true);
+  it('registers the youtube and web sources, in that order', () => {
+    expect(SOURCES.map((s) => s.name)).toEqual(['youtube', 'web']);
   });
 });
