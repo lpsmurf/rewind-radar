@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { jsonReply, textReply } from './helpers/anthropic.ts';
-import { POSTIZ, stubGitHub } from './helpers/github.ts';
+import { LPSMURF, POSTIZ, stubGitHub } from './helpers/github.ts';
 
 const { create, db } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any } }));
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
-import { budgetLeft, BudgetError, BusyError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
+import { budgetLeft, BudgetError, BusyError, getAssessment, personalFit, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
 import { clearRepoExistsCache, parseRepoRef, repoExists } from '../lib/github.ts';
 import { AssessError, SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
@@ -213,13 +213,21 @@ describe('fail-closed on the Sonnet paths', () => {
       return { data: null, error: { message: 'no such function' } };
     });
 
-  it('budgetLeft fails open by default and closed with failClosed', async () => {
+  it('budgetLeft fails closed when the meter errors or throws', async () => {
     for (const how of ['error', 'throw'] as const) {
       setup(null);
       meterDown(how);
-      expect(await budgetLeft()).toBe(true);
-      expect(await budgetLeft({ failClosed: true })).toBe(false);
+      expect(await budgetLeft()).toBe(false);
     }
+  });
+
+  it('personalFit returns null without calling Anthropic when the meter is broken', async () => {
+    stubGitHub(LPSMURF);
+    const d = setup(null);
+    meterDown('error');
+    expect(await personalFit(SAMPLE as any, 'gitroomhq/postiz-app', 'lpsmurf')).toBeNull();
+    expect(create).not.toHaveBeenCalled();
+    expect(d.calls('ai_usage')).toHaveLength(0);
   });
 
   it('a miss with a broken spend meter is over budget: no GitHub, no Sonnet', async () => {

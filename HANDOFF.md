@@ -39,9 +39,7 @@ The plan is in **docs/ROADMAP.md** (approved by Luis). It has six phases:
 A final Sonnet review of the diff led to six more fixes, also test-first: the `cf-connecting-ip` preference, the /profile database cap, budget checks running before the per-visitor slot is spent, the clamp on cached rows, metering right after the call, and the `repoExists` cache.
 
 **Known leftovers (not fixed, low or medium):**
-- The database caps are read-then-act. A burst of parallel requests can overshoot the hourly cap or the assess budget by the size of the burst. The fix is a reservation row or an advisory lock.
 - In-memory limits are still per Edge isolate, and pruning is O(n) once the map holds more than 5000 keys.
-- The Haiku paths (clerk ask, fit, submit, propose) still fail open if the meter is broken.
 
 ### Still to do for Phase 1 (Luis, in this order)
 1. **Apply `supabase/migrations/003_clerk.sql` before deploying this code**, through the SQL editor or `supabase link --project-ref onovfynfxuemvsrdetez` + `supabase db push`. The Sonnet paths now fail closed: without the migration, repo assessments and Scan my GitHub are refused, and the clerk answers from search only.

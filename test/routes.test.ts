@@ -492,3 +492,45 @@ describe('bare owner/repo never produces an error response', () => {
     expect((await post('clerk', { question: 'https://github.com/gitroomhq/postiz-app', visitorId: vid() })).status).toBe(503);
   });
 });
+
+describe('a broken spend meter fails closed on every Haiku route', () => {
+  const meterDown = () => {
+    const d = setup();
+    d.on('rpc:ai_spend_today', () => ({ data: null, error: { message: 'no such function' } }));
+    return d;
+  };
+
+  it('/clerk ask answers in search-only free mode, no Anthropic call', async () => {
+    meterDown();
+    const r = await post('clerk', { question: 'a skill for making diagrams', visitorId: vid() });
+    expect(r.body).toEqual({ answer: CLERK_LINES.free, slugs: ['diagram-design'], aisle: 'Design' });
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('/submit answers 503 budgetBusy, no Anthropic call, nothing inserted', async () => {
+    stubGitHub(POSTIZ);
+    const d = meterDown();
+    const r = await post('submit', { title: 'Postiz', url: 'https://github.com/gitroomhq/postiz-app', visitorId: vid() });
+    expect(r).toEqual({ status: 503, body: { error: CLERK_LINES.budgetBusy } });
+    expect(create).not.toHaveBeenCalled();
+    expect(d.calls('tapes').some((q: Query) => has(q, 'insert'))).toBe(false);
+  });
+
+  it('/propose answers 503 budgetBusy, no Anthropic call, nothing inserted', async () => {
+    const d = meterDown();
+    const r = await post('propose', { title: 'A cool idea', pitch: 'pitch', visitorId: 'visitor-propose-2' });
+    expect(r).toEqual({ status: 503, body: { error: CLERK_LINES.budgetBusy } });
+    expect(create).not.toHaveBeenCalled();
+    expect(d.calls('proposals')).toHaveLength(0);
+  });
+
+  it('radar/refresh is skipped with reason "budget", no radar_runs row, no Anthropic call', async () => {
+    vi.stubEnv('CRON_SECRET', 's3cret');
+    const d = meterDown();
+    d.on('radar_runs', () => ({ data: { id: 7 }, error: null }));
+    const r = await handle(new Request('http://localhost/api/radar/refresh', { method: 'POST', headers: { 'x-cron-secret': 's3cret' } }));
+    expect(await r.json()).toEqual({ ok: true, skipped: true, reason: 'budget' });
+    expect(d.calls('radar_runs').some((q: Query) => has(q, 'insert'))).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+  });
+});

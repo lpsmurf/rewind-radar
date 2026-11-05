@@ -107,19 +107,16 @@ export function clampRing(a: Assessment, s: HealthSignals): Assessment {
 }
 
 // ---------- spend meter ----------
-/**
- * False once today's AI spend has reached AI_DAILY_BUDGET_USD. If the meter is unavailable it fails open,
- * or closed with `failClosed` (use that before any Sonnet call).
- */
-export async function budgetLeft(o: { failClosed?: boolean } = {}): Promise<boolean> {
+/** False once today's AI spend has reached AI_DAILY_BUDGET_USD, or if the meter is unavailable (fails closed). */
+export async function budgetLeft(): Promise<boolean> {
   const cap = Number(env('AI_DAILY_BUDGET_USD') || '5');
   try {
     const { data, error } = await admin().rpc('ai_spend_today');
     if (error) throw error;
     return Number(data ?? 0) < cap;
   } catch (e) {
-    console.warn(`[budget] spend meter unavailable, ${o.failClosed ? 'blocking' : 'allowing'}`, e);
-    return !o.failClosed;
+    console.warn('[budget] spend meter unavailable, blocking', e);
+    return false;
   }
 }
 
@@ -288,7 +285,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
   }
 
   // Budget and database caps first, so a refused request does not burn the visitor's per-IP slot.
-  if (!(await budgetLeft({ failClosed: true }))) {
+  if (!(await budgetLeft())) {
     if (row) return fromRow(row, true);
     throw new BudgetError();
   }

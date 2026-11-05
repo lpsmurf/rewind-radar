@@ -154,7 +154,7 @@ export async function handle(req: Request): Promise<Response> {
       if (!prof) return json({ error: "Couldn't find that GitHub user or repo" }, 404);
       const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').eq('archived', false).limit(400);
       if (error) return json({ error: 'Catalog unavailable' }, 500);
-      if (!(await budgetLeft({ failClosed: true }))) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
       let slot;
       try {
         slot = await reserve('profile', {
