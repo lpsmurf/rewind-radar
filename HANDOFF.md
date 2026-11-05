@@ -1,4 +1,4 @@
-# Handoff — Rewind Radar Video (2026-11-05, MacBook → Mac Mini)
+# Handoff — Rewind Radar Video (2026-11-05, MacBook → work Mac mini)
 
 ## Objective
 Public, visual skill + repo library for the Supabase × Anthropic hackathon: an 8-bit video-rental store where
@@ -11,18 +11,24 @@ people browse, rent, vote, submit projects, propose ideas and get a personal Git
 - Data: 114 skills (2 own with full text; 112 third-party linked to source), 20 GitHub repos, 0 community, 0 proposals.
 - Verified live: clerk, Scan my GitHub, submit, propose + spam filter, votes via Realtime, rent rules, refresh guard, QR decodes to the site URL.
 
-## Set up the Mac Mini (≈5 min)
+## Set up the work Mac mini (≈5 min)
+This is the **work** Mac mini — not the always-on server (`luiss-mac-mini`, which runs the AX dashboard).
+Nothing below needs the server, Tailscale or the AX harness.
+
 1. Clone without overwriting anything:
    ```bash
-   [ -e ~/dev/projects/rewind-radar ] && echo "folder exists — stop" || git clone https://github.com/lpsmurf/rewind-radar.git ~/dev/projects/rewind-radar
+   mkdir -p ~/dev/projects && cd ~/dev/projects
+   [ -e rewind-radar ] && echo "folder exists — stop" || git clone https://github.com/lpsmurf/rewind-radar.git
    ```
-   (Once the ax-harness PR adding it to `config/projects.tsv` is merged, `ax projects` does this too.)
-2. `cd ~/dev/projects/rewind-radar && npm ci`
-3. Bring the keys over — `.env.local` is not in git. From the MacBook, copy the file across yourself
-   (AirDrop, or `scp ~/dev/projects/rewind-radar/.env.local <mac-mini-ssh-host>:~/dev/projects/rewind-radar/`).
-   Never paste keys into chat or commit them.
-4. Check: `npm run check:db` → all tables `ok`. Then `npm run dev`.
-5. For deploys: `npx supabase login` (browser, no email) and `gh auth status` (lpsmurf).
+   (If this Mac has the AX harness, `ax projects` does the same once ax-harness PR #65 is merged.)
+2. Node 20+ and packages: `node -v` then `cd ~/dev/projects/rewind-radar && npm ci`
+3. Keys: `.env.local` is not in git. **AirDrop** it from the MacBook (`~/dev/projects/rewind-radar/.env.local`)
+   into `~/dev/projects/rewind-radar/` (in Finder press ⌘⇧. to see dot-files). Never paste keys into chat or commit them.
+4. Check: `npm run check:db` → every table `ok`. Then `npm run dev` → http://localhost:5173
+5. To ship from this Mac: `gh auth login` (as lpsmurf) and `npx supabase login` (browser, no email), then
+   `npm run deploy:api` / `npm run deploy:site`.
+6. Re-seeding skills (`npm run seed:skills`, `npm run provenance`) reads `~/.claude/skills` on *this* Mac — only run
+   them on a machine with the full skill set, or the shelves will shrink to what's installed there.
 
 ## Gotchas
 - `claude-sonnet-5-5` rejects forced `tool_choice`; `lib/ai.ts` uses `auto` + text fallback for Sonnet.
