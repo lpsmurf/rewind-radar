@@ -143,6 +143,27 @@ A final Sonnet review of the diff led to six more fixes, also test-first: the `c
   - the cron routes refuse requests without the secret.
 - **Known small gaps:** the clerk's "go to aisle" for an old repo tape still points at New Releases. The batch reservation is all-or-nothing. In-memory rate limits are per isolate.
 
+### Rooms + repo radar: branch `feat/rooms` (Luis's requests, 2026-11-06)
+- **Two rooms in the VHS-stand style:**
+  - SKILLS (the old floor, skills only) and REPOS (a new room: the same 8 genre stands, every live repo and community tape, plus COMMUNITY PICKS).
+  - A door between them; the ARCADE door stays in the skills room.
+  - Presence `room` is `'store'|'repos'|'arcade'` ('store' = skills, so old clients keep working). You only see visitors in your own room.
+- **Releases browser:**
+  - Clicking a Weekly, Monthly or Community tape opens a big VHS cover (★ stars, ring, blurb, RENT/VOTE) with neighbouring tapes as spines on both sides.
+  - ◀ ▶ and the keyboard arrows wrap around; Esc closes. The arrows never steal keys from text inputs.
+- **★ GitHub stars** (one formatter: 980, 2.1K, 12.4K, 1.2M) show on the back-wall boxes (pixel star sprite, 6 per row, "+N MORE" opens the browser), on the TV, in the browser, in the tape panel ("RATING 4/5" plus "★ 1.2M on GitHub") and on the assessment card.
+- **QR removed** (sidebar card, big QR, Q shortcut, qrcode dependency).
+- **Clerk, store first, then GitHub:**
+  - If fewer than 3 store tapes match, it tops up from the official GitHub Search API: cached for 1 h, 10 searches a minute per IP, 25 a minute per isolate. Only real `github.com/owner/repo` hits are kept, and model picks are validated against them.
+  - GitHub picks show as spine chips under the answer and open in the browser.
+- **Personal radar (Scan my GitHub):**
+  - One Sonnet structured-output call over store tapes (the visitor's own repos removed) plus GitHub search hits for their languages and topics.
+  - It returns up to 8 repos (store first, then up to 5 from GitHub, with stars, licence and activity computed in code), then 2-3 skills.
+  - They open in the browser as "YOUR RADAR · @login" with WHY FOR YOU. GitHub covers have ASSESS IT (sends the URL to the clerk, once) and PUT ON COMMUNITY SHELF.
+  - About $0.04–0.08 per scan (reserve $0.08).
+- **Tests:** 648. tsc, build, sync-edge, `deno check` and gitleaks pass. A Sonnet review (7 findings) and two local browser runs (mocked APIs) were all fixed.
+- **No migration and no new secrets.**
+
 ### Everything Luis does by hand, in order (all phases)
 1. **Database:** apply migrations `003_clerk.sql`, then `004_chat.sql`, then `005_sources.sql` (SQL editor, or `supabase link` + `db push`). The new code refuses AI calls until 003 exists.
 2. **Secrets** (in your own terminal, never in chat):
