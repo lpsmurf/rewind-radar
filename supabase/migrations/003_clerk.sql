@@ -79,4 +79,4 @@ language sql stable set search_path = public as $$
   order by p.match desc, p.score desc
   limit greatest(1, least(n, 100)) + 20;
 $$;
-grant execute on function public.search_tapes(text, int) to anon, authenticated;
+revoke execute on function public.search_tapes(text, int) from public, anon, authenticated; -- only the Edge Function (service role) calls it
