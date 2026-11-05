@@ -14,11 +14,12 @@ describe('004_chat.sql', () => {
     expect(sql).toMatch(/tier in \('light', 'member'\)/);
     expect(sql).toMatch(/char_length\(login\) <= 39/);
   });
-  it('turns RLS on and only lets anon read recent visible rows', () => {
+  it('turns RLS on and only lets anon read the last 24 hours', () => {
     expect(sql).toMatch(/alter table public\.chat_messages enable row level security/);
-    expect(sql).toMatch(/using \(not hidden and at > now\(\) - interval '24 hours'\)/);
+    expect(sql).toMatch(/using \(at > now\(\) - interval '24 hours'\)/);
+    expect(sql).not.toMatch(/\bhidden\b|\breports int\b/); // moderation is a hard delete, so Realtime tells everyone
     expect(sql).toMatch(/revoke all on public\.chat_messages from public, anon, authenticated/);
-    expect(sql).toMatch(/grant select \(id, at, sender_key, login, tier, body, hidden\) on public\.chat_messages to anon, authenticated/); // never sender_id
+    expect(sql).toMatch(/grant select on public\.chat_messages to anon, authenticated/);
     expect(sql).not.toMatch(/create policy[^;]*for (insert|update|delete)/i); // the row lock "for update" in report_chat is not a policy
   });
   it('publishes to realtime idempotently and schedules a guarded hourly cleanup', () => {
@@ -29,6 +30,14 @@ describe('004_chat.sql', () => {
     expect(sql).toMatch(/'0 \* \* \* \*'/);
   });
 
+  it('keeps the identity key off the Realtime-visible table', () => {
+    expect(sql).not.toMatch(/chat_messages \(\s*[^;]*sender_id/); // not a column of chat_messages
+    expect(sql).toMatch(/create table if not exists public\.chat_senders \(\s*message_id bigint primary key references public\.chat_messages\(id\) on delete cascade,\s*sender_id text/);
+    expect(sql).toMatch(/alter table public\.chat_senders enable row level security/);
+    expect(sql).toMatch(/revoke all on public\.chat_senders from public, anon, authenticated/);
+    expect(sql).toMatch(/from public\.chat_senders where message_id = p_id and sender_id = p_reporter/);
+    expect(sql).not.toMatch(/grant [^;]*chat_senders/);
+  });
   it('keeps one report per reporter and a report_chat function only service_role may run', () => {
     expect(sql).toMatch(/create table if not exists public\.chat_reports/);
     expect(sql).toMatch(/primary key \(message_id, reporter\)/);

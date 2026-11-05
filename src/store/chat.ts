@@ -59,3 +59,9 @@ export function bubbleLines(m: ChatMsg): string[] {
   const name = chatName(m.login, m.tier);
   return [name.length > BUBBLE_COLS ? name.slice(0, BUBBLE_COLS - 2) + '..' : name, ...wrapBubble(m.body, BUBBLE_COLS, 3)];
 }
+
+/** The id from a Realtime DELETE payload (`old` holds just the primary key), or null. */
+export function deletedId(payload: { old?: { id?: unknown } } | null | undefined): number | null {
+  const id = payload?.old?.id;
+  return typeof id === 'number' && Number.isSafeInteger(id) ? id : null;
+}

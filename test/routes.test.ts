@@ -755,7 +755,8 @@ describe('visitor chat', () => {
   const bearer = (t: string) => ({ authorization: `Bearer ${t}` });
   const KEY = 'visitor-abc.tab-1';
   const insertsOf = (d: any) => d.calls('chat_messages').filter((q: Query) => has(q, 'insert')).map((q: Query) => arg(q, 'insert'));
-  const updatesOf = (d: any) => d.calls('chat_messages').filter((q: Query) => has(q, 'update')).map((q: Query) => arg(q, 'update'));
+  const deletesOf = (d: any) => d.calls('chat_messages').filter((q: Query) => has(q, 'delete')).map((q: Query) => q.calls.find((c) => c[0] === 'eq')!.slice(1));
+  const sendersOf = (d: any) => d.calls('chat_senders').filter((q: Query) => has(q, 'insert')).map((q: Query) => arg(q, 'insert'));
   const usageOf = (d: any) => d.calls('ai_usage').filter((q: Query) => has(q, 'insert')).map((q: Query) => arg(q, 'insert'));
   const ok = () => create.mockResolvedValue(toolReply('moderate_chat', { allowed: true, reason: '' }));
   const say = (text: string, o: { github?: string; key?: string; ip?: string; headers?: Record<string, string> } = {}) =>
@@ -765,8 +766,7 @@ describe('visitor chat', () => {
     const d = setup({ spent: o.spent });
     d.on('rpc:chat_spend_today', () => (o.chatSpent === 'error' ? { data: null, error: { message: 'boom' } } : { data: o.chatSpent ?? 0, error: null }));
     d.on('chat_messages', (q: Query) => {
-      if (has(q, 'insert')) { const { sender_id: _private, ...row } = arg(q, 'insert'); return { data: { id: 7, at: '2026-11-05T10:00:00Z', ...row }, error: null }; } // the real .select() leaves out sender_id
-      if (has(q, 'update')) return { data: null, error: null };
+      if (has(q, 'insert')) return { data: { id: 7, at: '2026-11-05T10:00:00Z', ...arg(q, 'insert') }, error: null };
       return { data: null, error: null };
     });
     return d;
@@ -849,7 +849,8 @@ describe('visitor chat', () => {
       const r = await say('  hello   world ', { github: 'lpsmurf', key: 'k'.repeat(120) });
       expect(r.status).toBe(200);
       expect(r.body).toEqual({ id: 7, at: '2026-11-05T10:00:00Z', sender_key: 'k'.repeat(80), login: 'lpsmurf', tier: 'light', body: 'hello world' });
-      expect(insertsOf(d)).toEqual([{ sender_key: 'k'.repeat(80), sender_id: 'gh:lpsmurf', login: 'lpsmurf', tier: 'light', body: 'hello world' }]);
+      expect(insertsOf(d)).toEqual([{ sender_key: 'k'.repeat(80), login: 'lpsmurf', tier: 'light', body: 'hello world' }]);
+      expect(sendersOf(d)).toEqual([{ message_id: 7, sender_id: 'gh:lpsmurf' }]); // the identity key lives apart from the public row
       expect(d.calls('chat_messages')[0].calls.find((c: any) => c[0] === 'select')?.[1]).toBe('id,at,sender_key,login,tier,body');
       expect(create.mock.calls[0][0].model).toBe(HAIKU);
       expect(create.mock.calls[0][0].messages[0].content).toContain('hello world');
@@ -868,7 +869,8 @@ describe('visitor chat', () => {
       ok();
       const r = await post('chat', { text: 'hi there', key: KEY, github: 'someone-else' }, undefined, bearer('tok'));
       expect(r.status).toBe(200);
-      expect(insertsOf(d)).toEqual([{ sender_key: KEY, sender_id: 'm:uid-octo', login: 'octo', tier: 'member', body: 'hi there' }]);
+      expect(insertsOf(d)).toEqual([{ sender_key: KEY, login: 'octo', tier: 'member', body: 'hi there' }]);
+      expect(sendersOf(d)).toEqual([{ message_id: 7, sender_id: 'm:uid-octo' }]);
     });
 
     // Flipped on purpose: this used to post on the free checks alone when the budget ran out. That meant a
@@ -920,6 +922,15 @@ describe('visitor chat', () => {
       const d = chatSetup();
       expect((await say('hello', { key: '' })).status).toBe(400);
       expect(insertsOf(d)).toHaveLength(0);
+    });
+
+    it('removes the message again when its sender row cannot be saved', async () => {
+      const d = chatSetup();
+      d.on('chat_senders', () => ({ data: null, error: { message: 'boom' } }));
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      ok();
+      expect((await say('hello')).status).toBe(500);
+      expect(deletesOf(d)).toEqual([['id', 7]]);
     });
 
     it('answers 500 when the insert fails', async () => {
@@ -995,11 +1006,11 @@ describe('visitor chat', () => {
     const del = (token: string | undefined, id: unknown = 5) =>
       post('chat/delete', { id }, undefined, token === undefined ? {} : { 'x-admin-token': token });
 
-    it('hides the message for the right token', async () => {
+    it('deletes the message for the right token', async () => {
       vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
       const d = chatSetup();
       expect((await del('sesame-open')).status).toBe(200);
-      expect(updatesOf(d)).toEqual([{ hidden: true }]);
+      expect(deletesOf(d)).toEqual([['id', 5]]); // a hard delete, so Realtime tells everyone
     });
 
     it('refuses a wrong token and a missing token', async () => {
@@ -1009,7 +1020,7 @@ describe('visitor chat', () => {
       expect((await del('sesame')).status).toBe(403);
       expect((await del('')).status).toBe(403);
       expect((await del(undefined)).status).toBe(403);
-      expect(updatesOf(d)).toHaveLength(0);
+      expect(deletesOf(d)).toHaveLength(0);
     });
 
     it('is always forbidden when ADMIN_TOKEN is not set', async () => {
@@ -1018,7 +1029,7 @@ describe('visitor chat', () => {
       expect((await del('')).status).toBe(403);
       expect((await del('undefined')).status).toBe(403);
       expect((await del(undefined)).status).toBe(403);
-      expect(updatesOf(d)).toHaveLength(0);
+      expect(deletesOf(d)).toHaveLength(0);
     });
 
     it('400s a bad id', async () => {

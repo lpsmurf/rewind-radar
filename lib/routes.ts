@@ -385,12 +385,19 @@ export async function handle(req: Request): Promise<Response> {
       return json({ error: CHAT_LINES.busy }, 503);
     }
     try {
-      const { data, error } = await admin()
+      const db = admin();
+      const { data, error } = await db
         .from('chat_messages')
-        .insert({ sender_key: key, sender_id: idKey, login: id.github, tier: id.tier, body: checked.text })
+        .insert({ sender_key: key, login: id.github, tier: id.tier, body: checked.text })
         .select('id,at,sender_key,login,tier,body')
         .single();
-      if (error) throw error;
+      if (error || !data) throw error ?? new Error('no row');
+      // The identity key sits in its own table: Realtime sends whole rows, and anon must not see it.
+      const { error: senderErr } = await db.from('chat_senders').insert({ message_id: data.id, sender_id: idKey });
+      if (senderErr) {
+        await db.from('chat_messages').delete().eq('id', data.id); // never leave a message nobody can be held to
+        throw senderErr;
+      }
       return json(data);
     } catch (e) {
       console.error('[chat]', e);
@@ -398,14 +405,14 @@ export async function handle(req: Request): Promise<Response> {
     }
   }
 
-  // --- admin: take a chat message down (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
+  // --- admin: delete a chat message for good (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
   if (path === 'chat/delete' && req.method === 'POST') {
     const secret = env('ADMIN_TOKEN');
     if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
     const mid = Number(body.id);
     if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
-    const { error } = await admin().from('chat_messages').update({ hidden: true }).eq('id', mid);
-    return error ? json({ error: 'Could not hide the message' }, 500) : json({ ok: true });
+    const { error } = await admin().from('chat_messages').delete().eq('id', mid);
+    return error ? json({ error: 'Could not delete the message' }, 500) : json({ ok: true });
   }
 
   return json({ error: 'Not found' }, 404);

@@ -7,7 +7,7 @@ import { sb } from './supabase';
 import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './clerkGate';
 import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
 import { createSendGate } from '../store/movement';
-import { mergeChat, removeChat, type ChatEntry, type ChatMsg } from '../store/chat';
+import { deletedId, mergeChat, removeChat, type ChatEntry, type ChatMsg } from '../store/chat';
 
 const CHAT_COLS = 'id,at,sender_key,login,tier,body';
 const COLS =
@@ -87,7 +87,7 @@ export function useStore() {
       setTapes(((tr.data ?? []) as any[]).map((t) => ({ ...t, votes: vm.get(t.id) ?? 0 }) as Tape));
       const pr = await c.from('proposals').select('id,kind,title,pitch,link,submitter,genre,votes,created_at').order('votes', { ascending: false }).order('created_at', { ascending: false }).limit(100);
       if (!dead) setProposals((pr.data ?? []) as Proposal[]);
-      // last 50 visible messages (RLS hides hidden and day-old rows); seen = 0 so history never pops a bubble
+      // last 50 visible messages (RLS hides day-old rows); seen = 0 so history never pops a bubble
       const cr = await c.from('chat_messages').select(CHAT_COLS).order('id', { ascending: false }).limit(50);
       if (!dead) setChat((cur) => mergeChat(cur, ((cr.data ?? []) as ChatMsg[]).slice().reverse(), 0));
     })();
@@ -126,8 +126,9 @@ export function useStore() {
     ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'chat_messages' }, (p: any) => {
       if (p.new?.id) setChat((cur) => mergeChat(cur, [p.new as ChatMsg], Date.now()));
     });
-    ch.on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'chat_messages' }, (p: any) => {
-      if (p.new?.id && p.new.hidden) setChat((cur) => removeChat(cur, p.new.id));
+    ch.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'chat_messages' }, (p: any) => {
+      const gone = deletedId(p); // a delete carries only the primary key
+      if (gone !== null) setChat((cur) => removeChat(cur, gone));
     });
     ch.on('broadcast', { event: 'move' }, ({ payload }: any) => {
       const { key, x, y } = payload ?? {};
