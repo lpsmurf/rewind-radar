@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { backoffMs, createTrackGate, visitorsFromPresence, type PresencePayload } from '../src/store/presence.ts';
+import { backoffMs, createTrackGate, handleChannelStatus, visitorsFromPresence, type PresencePayload } from '../src/store/presence.ts';
 import { H, W } from '../src/store/movement.ts';
 import { staleThenFresh } from './helpers/presence.ts';
 
@@ -92,5 +92,49 @@ describe('createTrackGate', () => {
     g.cancel();
     wait(9000);
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('handleChannelStatus', () => {
+  const make = () => {
+    const state = { current: 'ch' as string | null };
+    const calls = { up: 0, down: 0, retries: [] as number[], removed: 0 };
+    let attempt = 0;
+    const deps = {
+      isCurrent: (ch: string) => state.current === ch,
+      clear: () => { state.current = null; },
+      onUp: () => { calls.up++; attempt = 0; },
+      onDown: () => { calls.down++; },
+      // realtime-js: removeChannel -> leave -> the subscribe callback fires CLOSED again, synchronously
+      remove: (ch: string) => { calls.removed++; handleChannelStatus('CLOSED', ch, deps); },
+      retry: () => { calls.retries.push(attempt++); },
+    };
+    return { state, calls, deps };
+  };
+
+  it('does not recurse when removing the channel fires CLOSED again, and retries once', () => {
+    const { calls, state, deps } = make();
+    expect(() => handleChannelStatus('CLOSED', 'ch', deps)).not.toThrow();
+    expect(calls.removed).toBe(1);
+    expect(calls.retries).toEqual([0]);
+    expect(calls.down).toBe(1);
+    expect(state.current).toBeNull();
+  });
+  it('treats CHANNEL_ERROR and TIMED_OUT like CLOSED', () => {
+    for (const s of ['CHANNEL_ERROR', 'TIMED_OUT']) {
+      const { calls, deps } = make();
+      handleChannelStatus(s, 'ch', deps);
+      expect(calls.retries).toHaveLength(1);
+    }
+  });
+  it('ignores a channel that was already replaced', () => {
+    const { calls, deps } = make();
+    handleChannelStatus('CLOSED', 'old', deps);
+    expect(calls).toMatchObject({ removed: 0, down: 0, retries: [] });
+  });
+  it('marks the channel live on SUBSCRIBED', () => {
+    const { calls, deps } = make();
+    handleChannelStatus('SUBSCRIBED', 'ch', deps);
+    expect(calls).toMatchObject({ up: 1, removed: 0, retries: [] });
   });
 });

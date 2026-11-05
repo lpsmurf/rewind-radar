@@ -95,3 +95,31 @@ export function createTrackGate(send: (p: PresencePayload) => void, o: TrackGate
     cancel: stop,
   };
 }
+
+export interface ChannelStatusDeps<C> {
+  isCurrent: (ch: C) => boolean;
+  clear: () => void;
+  onUp: () => void;
+  onDown: () => void;
+  remove: (ch: C) => void;
+  retry: () => void;
+}
+
+/**
+ * React to a Realtime channel status. On CLOSED/CHANNEL_ERROR/TIMED_OUT the channel is forgotten *before* it is
+ * removed: removeChannel() leaves the channel, which fires this callback with CLOSED again synchronously, and the
+ * isCurrent guard must already say no, or the two call each other until the stack overflows.
+ */
+export function handleChannelStatus<C>(status: string, ch: C, d: ChannelStatusDeps<C>): void {
+  if (!d.isCurrent(ch)) return; // a channel we already replaced or tore down
+  if (status === 'SUBSCRIBED') return d.onUp();
+  if (status !== 'CLOSED' && status !== 'CHANNEL_ERROR' && status !== 'TIMED_OUT') return;
+  d.clear();
+  d.onDown();
+  d.retry();
+  try {
+    d.remove(ch);
+  } catch {
+    /* already gone */
+  }
+}

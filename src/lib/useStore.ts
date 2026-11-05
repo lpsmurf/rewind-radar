@@ -8,7 +8,7 @@ import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './cle
 import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
 import { createSendGate } from '../store/movement';
 import { acceptMove, rememberPos } from '../store/remote';
-import { backoffMs, createTrackGate, visitorsFromPresence, type PresencePayload } from '../store/presence';
+import { backoffMs, createTrackGate, handleChannelStatus, visitorsFromPresence, type PresencePayload } from '../store/presence';
 import { deletedId, mergeChat, removeChat, type ChatEntry, type ChatMsg } from '../store/chat';
 
 const CHAT_COLS = 'id,at,sender_key,login,tier,body';
@@ -158,20 +158,26 @@ export function useStore() {
       setVisitors(next);
     });
     ch.subscribe((status: string) => {
-      if (dead || chanRef.current !== ch) return; // a channel we already replaced or tore down
-      if (status === 'SUBSCRIBED') {
-        attempt = 0;
-        subscribedRef.current = true;
-        setLive(true);
-        gateRef2.current.force(presenceRef.current); // a fresh channel has no presence yet
-      } else if (status === 'CLOSED' || status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
-        subscribedRef.current = false;
-        setLive(false);
-        c.removeChannel(ch);
-        chanRef.current = null;
-        window.clearTimeout(retry);
-        retry = window.setTimeout(connect, backoffMs(attempt++));
-      }
+      if (dead) return;
+      handleChannelStatus(status, ch, {
+        isCurrent: (x) => chanRef.current === x,
+        clear: () => { chanRef.current = null; },
+        onUp: () => {
+          attempt = 0;
+          subscribedRef.current = true;
+          setLive(true);
+          gateRef2.current.force(presenceRef.current); // a fresh channel has no presence yet
+        },
+        onDown: () => {
+          subscribedRef.current = false;
+          setLive(false);
+        },
+        remove: (x) => c.removeChannel(x),
+        retry: () => {
+          window.clearTimeout(retry);
+          retry = window.setTimeout(connect, backoffMs(attempt++));
+        },
+      });
     });
     chanRef.current = ch;
     };
