@@ -116,6 +116,16 @@ describe('getAssessment', () => {
     expect(d.calls('ai_usage').filter((q: Query) => has(q, 'insert'))).toHaveLength(1);
   });
 
+  it('clamps the ring from the repo signals before storing it', async () => {
+    const repoBody = JSON.parse(POSTIZ['/repos/gitroomhq/postiz-app'].body);
+    stubGitHub({ ...POSTIZ, '/repos/gitroomhq/postiz-app': { body: JSON.stringify({ ...repoBody, archived: true }) } });
+    const d = setup(null);
+    create.mockResolvedValue(jsonReply({ ...SAMPLE, ring: 'adopt', ai_directed_text: false }));
+    const r = await getAssessment(ref, allow);
+    expect(r!.assessment.ring).toBe('hold');
+    expect(arg(d.calls('assessments').find((q: Query) => has(q, 'upsert'))!, 'upsert').data.ring).toBe('hold');
+  });
+
   it('returns null for a repo GitHub does not have', async () => {
     stubGitHub({});
     setup(null);

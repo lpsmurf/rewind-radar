@@ -89,6 +89,20 @@ export function normalizeAssessment(raw: unknown, knownSlugs: string[]): Assessm
   };
 }
 
+/**
+ * The model reads a README that may be persuasive; the ring is capped in code from facts it cannot argue with:
+ * archived -> hold; no licence or no push for over a year -> at most trial. Only ever lowers a ring.
+ */
+export function clampRing(a: Assessment, s: HealthSignals): Assessment {
+  let max: Ring = 'adopt';
+  let why = '';
+  if (s.archived) [max, why] = ['hold', 'Repo is archived; ring capped at hold.'];
+  else if (s.licence_kind === 'none') [max, why] = ['trial', 'No licence found; ring capped at trial.'];
+  else if (s.days_since_push > 365) [max, why] = ['trial', 'No push in over a year; ring capped at trial.'];
+  if (RINGS.indexOf(a.ring) >= RINGS.indexOf(max)) return a;
+  return { ...a, ring: max, risks: [why, ...a.risks].slice(0, 6) };
+}
+
 // ---------- spend meter ----------
 /**
  * False once today's AI spend has reached AI_DAILY_BUDGET_USD. If the meter is unavailable it fails open,
@@ -218,7 +232,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     const signals = healthSignals(facts);
     const cands = await candidates(`${facts.full_name} ${facts.description ?? ''} ${facts.topics.join(' ')}`, 20);
     const { raw, usage, model } = await assessRepoAI(facts, signals, facts.readme, cands);
-    const assessment = normalizeAssessment(raw, cands.map((c) => c.slug));
+    const assessment = clampRing(normalizeAssessment(raw, cands.map((c) => c.slug)), signals);
     const repo: RepoSummary = {
       full_name: facts.full_name,
       html_url: facts.html_url,

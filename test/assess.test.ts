@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { healthSignals, normalizeAssessment, sanitizeUntrusted } from '../lib/assess.ts';
+import { clampRing, healthSignals, normalizeAssessment, sanitizeUntrusted } from '../lib/assess.ts';
 import { costUsd, HAIKU, SONNET } from '../lib/ai.ts';
+import type { Assessment, HealthSignals, Ring } from '../src/types.ts';
 import { facts } from './helpers/samples.ts';
 
 const NOW = Date.parse('2026-11-05T00:00:00Z');
@@ -86,6 +87,39 @@ describe('normalizeAssessment', () => {
     expect(a.ring).toBe('hold');
     expect(normalizeAssessment({ ...raw, ring: 'trial', ai_directed_text: true }, []).ring).toBe('hold');
     expect(a.risks.join(' ')).toMatch(/AI/);
+  });
+});
+
+describe('clampRing', () => {
+  const sig = (o: Partial<HealthSignals> = {}): HealthSignals => ({ ...healthSignals(facts()), ...o });
+  const a = (ring: Ring): Assessment => ({ ...normalizeAssessment({ ring, risks: ['r'] }, []), ring });
+  const RINGS: Ring[] = ['adopt', 'trial', 'assess', 'hold'];
+
+  it('leaves a healthy repo alone', () => {
+    for (const r of RINGS) expect(clampRing(a(r), sig()).ring).toBe(r);
+  });
+  it('holds an archived repo whatever the model said', () => {
+    for (const r of RINGS) expect(clampRing(a(r), sig({ archived: true })).ring).toBe('hold');
+  });
+  it('caps a repo with no licence at trial', () => {
+    const s = sig({ licence: null, licence_kind: 'none' });
+    expect(['adopt', 'trial', 'assess', 'hold'].map((r) => clampRing(a(r as Ring), s).ring)).toEqual(['trial', 'trial', 'assess', 'hold']);
+  });
+  it('caps a repo not pushed for over a year at trial, but not at exactly a year', () => {
+    expect(clampRing(a('adopt'), sig({ days_since_push: 366 })).ring).toBe('trial');
+    expect(clampRing(a('adopt'), sig({ days_since_push: 365 })).ring).toBe('adopt');
+  });
+  it('never raises a ring', () => {
+    const order = (r: Ring) => RINGS.indexOf(r);
+    for (const s of [sig(), sig({ archived: true }), sig({ licence_kind: 'none' }), sig({ days_since_push: 9999 })])
+      for (const r of RINGS) expect(order(clampRing(a(r), s).ring)).toBeGreaterThanOrEqual(order(r));
+  });
+  it('adds a note only when it lowers the ring', () => {
+    expect(clampRing(a('adopt'), sig({ archived: true })).risks[0]).toMatch(/archived/i);
+    expect(clampRing(a('adopt'), sig({ licence_kind: 'none' })).risks[0]).toMatch(/licen[cs]e/i);
+    expect(clampRing(a('adopt'), sig({ days_since_push: 400 })).risks[0]).toMatch(/year/i);
+    expect(clampRing(a('hold'), sig({ archived: true })).risks).toEqual(['r']);
+    expect(clampRing(a('adopt'), sig()).risks).toEqual(['r']);
   });
 });
 
