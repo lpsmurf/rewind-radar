@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatStars, starsLabel } from '../src/lib/stars.ts';
+import { formatStars, ratingLabel, starsLabel } from '../src/lib/stars.ts';
 import { GLYPHS, STAR, ellipsize, textWidth } from '../src/store/pixelText.ts';
 
 describe('formatStars', () => {
@@ -32,8 +32,8 @@ describe('wall labels use the shared formatter, uppercased for the pixel font', 
 
 describe('starsLabel (what a tape shows, if anything)', () => {
   it('shows stars only for repo and community tapes that have a count', () => {
-    expect(starsLabel({ kind: 'repo', stars: 12400 })).toBe('★ 12.4k');
-    expect(starsLabel({ kind: 'community', stars: 5 })).toBe('★ 5');
+    expect(starsLabel({ kind: 'repo', stars: 12400 })).toBe('★ 12.4k on GitHub');
+    expect(starsLabel({ kind: 'community', stars: 5 })).toBe('★ 5 on GitHub');
     expect(starsLabel({ kind: 'skill', stars: 99 })).toBeNull();
     expect(starsLabel({ kind: 'repo', stars: null })).toBeNull();
   });
@@ -59,5 +59,14 @@ describe('ellipsize (one line on the TV)', () => {
     expect(ellipsize('skill-1-design-kit', 10)).toBe('skill-1...');
     expect(ellipsize('skill-1-design-kit', 10)).toHaveLength(10);
     expect(ellipsize('abcdef', 3)).toBe('...');
+  });
+});
+
+describe('ratingLabel (the clerk rating, kept apart from GitHub stars)', () => {
+  it('reads RATING n/5 with no star glyph', () => {
+    expect(ratingLabel(4)).toBe('RATING 4/5');
+    expect(ratingLabel(3.6)).toBe('RATING 4/5');
+    expect(ratingLabel(null)).toBeNull();
+    expect(ratingLabel(4)).not.toContain('★');
   });
 });

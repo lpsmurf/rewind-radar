@@ -19,7 +19,10 @@ export function compactStars(n: number): string {
   return Math.min(999, Math.round(n / 1e6)) + 'M';
 }
 
-/** "★ 12.4k" for repo and community tapes with a star count; skills have none, so null. */
+/** "RATING 4/5": the clerk's rating, worded so it is not mistaken for GitHub stars. */
+export const ratingLabel = (r: number | null): string | null => (r == null ? null : `RATING ${Math.round(r)}/5`);
+
+/** "★ 12.4k on GitHub" for repo and community tapes with a star count; skills have none, so null. */
 export function starsLabel(t: { kind: string; stars: number | null }): string | null {
-  return (t.kind === 'repo' || t.kind === 'community') && t.stars != null ? '★ ' + formatStars(t.stars) : null;
+  return (t.kind === 'repo' || t.kind === 'community') && t.stars != null ? '★ ' + formatStars(t.stars) + ' on GitHub' : null;
 }
