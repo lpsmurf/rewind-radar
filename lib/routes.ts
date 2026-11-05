@@ -27,6 +27,16 @@ function limited(id: string, max: number): boolean {
   return false;
 }
 
+/** Run an AI call, collect its usage, and record it (even if the call throws). */
+async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): Promise<T> {
+  const used: [string, Parameters<OnUsage>[1]][] = [];
+  try {
+    return await run((m, u) => used.push([m, u]));
+  } finally {
+    for (const [m, u] of used) await recordUsage(route, m, u);
+  }
+}
+
 const TAPE_COLS = 'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
 
 export async function handle(req: Request): Promise<Response> {
@@ -89,13 +99,7 @@ export async function handle(req: Request): Promise<Response> {
         if (!hits.length) return json({ answer: CLERK_LINES.freeNone, ...plain });
         return json({ answer: CLERK_LINES.free, slugs: hits.map((r) => r.slug), aisle: aisleOf(hits[0] as Parameters<typeof aisleOf>[0]) });
       }
-      const used: [string, Parameters<OnUsage>[1]][] = [];
-      let out;
-      try {
-        out = await clerk(text, rows, (m, u) => used.push([m, u]));
-      } finally {
-        for (const [m, u] of used) await recordUsage('clerk', m, u);
-      }
+      const out = await meter('clerk', (onUsage) => clerk(text, rows, onUsage));
       if (!out.on_topic) return json({ answer: CLERK_LINES.offTopic, ...plain });
       return json({ answer: out.answer, slugs: out.slugs, aisle: out.aisle });
     } catch (e) {
@@ -114,7 +118,8 @@ export async function handle(req: Request): Promise<Response> {
       if (!prof) return json({ error: "Couldn't find that GitHub user or repo" }, 404);
       const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').eq('archived', false).limit(400);
       if (error) return json({ error: 'Catalog unavailable' }, 500);
-      const rec = await recommendForProfile(prof.text, data ?? []);
+      if (!(await budgetLeft({ failClosed: true }))) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      const rec = await meter('profile', (onUsage) => recommendForProfile(prof.text, data ?? [], onUsage));
       return json({ ...rec, name: prof.name, kind: prof.kind, slugs: rec.picks.map((p) => p.slug) });
     } catch (e) {
       console.error('[profile]', e);
@@ -135,8 +140,9 @@ export async function handle(req: Request): Promise<Response> {
     if (submitter.length > 30) return json({ error: 'Handle must be 30 characters or fewer' }, 400);
     if (limited('submit:' + who, 3)) return json({ error: 'Max 3 submissions per hour' }, 429);
     try {
+      if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
       const repo = await fetchRepo(url);
-      const review = await reviewSubmission({ title, url, note, repo });
+      const review = await meter('submit', (onUsage) => reviewSubmission({ title, url, note, repo }, onUsage));
       const { data, error } = await admin()
         .from('tapes')
         .insert({
@@ -176,12 +182,13 @@ export async function handle(req: Request): Promise<Response> {
     const secret = env('CRON_SECRET');
     const forced = !!secret && req.headers.get('x-cron-secret') === secret;
     const db = admin();
+    if (!(await budgetLeft())) return json({ ok: true, skipped: true, reason: 'budget' });
     const { data: last } = await db.from('radar_runs').select('ran_at').order('ran_at', { ascending: false }).limit(1).maybeSingle();
     const hours = last ? (Date.now() - new Date(last.ran_at).getTime()) / 36e5 : Infinity;
     if (!forced && hours < 60) return json({ ok: true, skipped: true, due_in_hours: Math.ceil(60 - hours) });
     const { data: run, error } = await db.from('radar_runs').insert({ stocked: 0 }).select('id').single();
     if (error || !run) return json({ error: 'Could not start refresh' }, 500);
-    const job = refreshRadar(20)
+    const job = meter('radar', (onUsage) => refreshRadar(20, onUsage))
       .then(async (n) => { await db.from('radar_runs').update({ stocked: n }).eq('id', run.id); return n; })
       .catch(async (e) => { console.error('[radar]', e); await db.from('radar_runs').delete().eq('id', run.id); throw e; });
     const rt = (globalThis as any).EdgeRuntime;
@@ -210,7 +217,8 @@ export async function handle(req: Request): Promise<Response> {
     if (visitorId.length < 8 || visitorId.length > 64) return json({ error: 'Missing visitor id' }, 400);
     if (limited('propose:' + who, 5)) return json({ error: 'Max 5 proposals per hour' }, 429);
     try {
-      const r = await reviewProposal({ title, pitch, link });
+      if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      const r = await meter('propose', (onUsage) => reviewProposal({ title, pitch, link }, onUsage));
       if (!r.allowed) return json({ error: `The clerk turned this one down: ${r.reason || 'not a fit for the store'}` }, 422);
       const { data, error } = await admin()
         .from('proposals')

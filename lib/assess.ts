@@ -90,16 +90,19 @@ export function normalizeAssessment(raw: unknown, knownSlugs: string[]): Assessm
 }
 
 // ---------- spend meter ----------
-/** False once today's AI spend has reached AI_DAILY_BUDGET_USD. Fails open if the meter is unavailable. */
-export async function budgetLeft(): Promise<boolean> {
+/**
+ * False once today's AI spend has reached AI_DAILY_BUDGET_USD. If the meter is unavailable it fails open,
+ * or closed with `failClosed` (use that before any Sonnet call).
+ */
+export async function budgetLeft(o: { failClosed?: boolean } = {}): Promise<boolean> {
   const cap = Number(env('AI_DAILY_BUDGET_USD') || '5');
   try {
     const { data, error } = await admin().rpc('ai_spend_today');
     if (error) throw error;
     return Number(data ?? 0) < cap;
   } catch (e) {
-    console.warn('[budget] spend meter unavailable, allowing', e);
-    return true;
+    console.warn(`[budget] spend meter unavailable, ${o.failClosed ? 'blocking' : 'allowing'}`, e);
+    return !o.failClosed;
   }
 }
 

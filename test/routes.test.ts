@@ -169,3 +169,110 @@ describe('POST /clerk: pasted repos', () => {
     expect(r.body).toEqual({ answer: CLERK_LINES.budget, slugs: [], aisle: 'counter' });
   });
 });
+
+describe('every Anthropic route is budget-gated and metered', () => {
+  const usageRoutes = (d: any) => d.calls('ai_usage').filter((q: Query) => has(q, 'insert')).map((q: Query) => q.calls.find((c) => c[0] === 'insert')![1] as any);
+  const PROFILE = { ...LPSMURF, ...POSTIZ };
+  const spentSetup = () => {
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
+    return setup({ spent: 2 });
+  };
+
+  it('/profile records Sonnet usage as route "profile"', async () => {
+    stubGitHub(PROFILE);
+    const d = setup();
+    create.mockResolvedValue(toolReply('profile_radar', { answer: 'Nice shelf.', picks: [], aisle: 'counter' }));
+    const r = await post('profile', { github: 'lpsmurf', visitorId: vid() });
+    expect(r.status).toBe(200);
+    expect(usageRoutes(d)).toMatchObject([{ route: 'profile' }]);
+  });
+
+  it('/profile over budget answers 503 with no Anthropic call', async () => {
+    stubGitHub(PROFILE);
+    spentSetup();
+    const r = await post('profile', { github: 'lpsmurf', visitorId: vid() });
+    expect(r.status).toBe(503);
+    expect(r.body.error).toBe(CLERK_LINES.budgetBusy);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('/profile fails closed when the spend meter errors', async () => {
+    stubGitHub(PROFILE);
+    const d = setup();
+    d.on('rpc:ai_spend_today', () => ({ data: null, error: { message: 'boom' } }));
+    const r = await post('profile', { github: 'lpsmurf', visitorId: vid() });
+    expect(r.status).toBe(503);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('/submit records usage as "submit"; over budget gives 503 and inserts nothing', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup();
+    d.on('tapes', () => ({ data: { id: 1 }, error: null }));
+    create.mockResolvedValue(toolReply('review_submission', { genre: 'Dev Workflow', blurb: 'b', ring: 'trial', rating: 4, trust: 'clean' }));
+    const body = { title: 'Postiz', url: 'https://github.com/gitroomhq/postiz-app', visitorId: vid() };
+    expect((await post('submit', body)).status).toBe(200);
+    expect(usageRoutes(d)).toMatchObject([{ route: 'submit' }]);
+
+    create.mockClear();
+    const d2 = spentSetup();
+    const r = await post('submit', { ...body, visitorId: vid() });
+    expect(r.status).toBe(503);
+    expect(r.body.error).toBe(CLERK_LINES.budgetBusy);
+    expect(create).not.toHaveBeenCalled();
+    expect(d2.calls('tapes').some((q: Query) => has(q, 'insert'))).toBe(false);
+  });
+
+  it('/propose records usage as "propose"; over budget gives 503 and inserts nothing', async () => {
+    const d = setup();
+    d.on('proposals', () => ({ data: { id: 1 }, error: null }));
+    create.mockResolvedValue(toolReply('screen_proposal', { allowed: true, reason: '', kind: 'idea', genre: 'Dev Workflow', pitch: 'p' }));
+    const body = { title: 'A cool idea', pitch: 'pitch', visitorId: 'visitor-propose-1' };
+    expect((await post('propose', body)).status).toBe(200);
+    expect(usageRoutes(d)).toMatchObject([{ route: 'propose' }]);
+
+    create.mockClear();
+    const d2 = spentSetup();
+    const r = await post('propose', body);
+    expect(r.status).toBe(503);
+    expect(create).not.toHaveBeenCalled();
+    expect(d2.calls('proposals')).toHaveLength(0);
+  });
+});
+
+describe('POST radar/refresh', () => {
+  const refresh = () =>
+    handle(new Request('http://localhost/api/radar/refresh', { method: 'POST', headers: { 'x-cron-secret': 's3cret' } })).then(async (r) => ({
+      status: r.status,
+      body: (await r.json()) as any,
+    }));
+  const radarDb = (spent = 0) => {
+    const d = setup({ spent });
+    d.on('radar_runs', (q: Query) => (has(q, 'insert') ? { data: { id: 7 }, error: null } : { data: null, error: null }));
+    return d;
+  };
+
+  it('skips the run without inserting a radar_runs row when the budget is spent', async () => {
+    vi.stubEnv('CRON_SECRET', 's3cret');
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
+    const d = radarDb(2);
+    expect(await refresh()).toEqual({ status: 200, body: { ok: true, skipped: true, reason: 'budget' } });
+    expect(d.calls('radar_runs').some((q: Query) => has(q, 'insert'))).toBe(false);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('records each review as route "radar"', async () => {
+    vi.stubEnv('CRON_SECRET', 's3cret');
+    const d = radarDb();
+    vi.stubGlobal('fetch', async (u: unknown) =>
+      String(u).includes('/search/repositories')
+        ? new Response(JSON.stringify({ items: [{ full_name: 'a/b', owner: { login: 'a' }, description: 'd', language: 'TS', stargazers_count: 5, html_url: 'https://github.com/a/b' }] }))
+        : new Response('readme'),
+    );
+    create.mockResolvedValue(toolReply('review_repo', { genre: 'Dev Workflow', blurb: 'b', ring: 'trial', rating: 4 }));
+    const r = await refresh();
+    expect(r.body).toMatchObject({ ok: true, stocked: 1 });
+    const rows = d.calls('ai_usage').filter((q: Query) => has(q, 'insert'));
+    expect(rows.map((q: Query) => (q.calls.find((c) => c[0] === 'insert')![1] as any).route)).toEqual(['radar']);
+  });
+});

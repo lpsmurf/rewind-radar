@@ -128,8 +128,9 @@ const RINGS = `ring: "adopt" = useful and solid enough to use now; "trial" = pro
 const RING_RULES = `${RINGS}
 rating: 1-5 stars for builders who work with AI coding agents.`;
 
-export async function reviewRepo(r: RepoInput): Promise<RepoReview> {
+export async function reviewRepo(r: RepoInput, onUsage?: OnUsage): Promise<RepoReview> {
   const out = await tool<RepoReview>({
+    onUsage,
     model: HAIKU,
     name: 'review_repo',
     system: `You are the film critic of a retro video-rental store whose New Releases wall is this week's most-starred new GitHub repos. ${DATA_RULE}
@@ -150,9 +151,10 @@ export async function reviewSubmission(input: {
   url: string;
   note: string;
   repo: (RepoInput & { html_url?: string }) | null;
-}): Promise<{ genre: Genre; blurb: string; ring: Ring; rating: number; trust: Trust }> {
+}, onUsage?: OnUsage): Promise<{ genre: Genre; blurb: string; ring: Ring; rating: number; trust: Trust }> {
   const r = input.repo;
   const out = await tool<{ genre: Genre; blurb: string; ring: Ring; rating: number; trust: Trust }>({
+    onUsage,
     model: HAIKU,
     name: 'review_submission',
     system: `You review community project submissions for a retro video-rental store's "Community Picks" shelf at a hackathon. Be encouraging but honest. ${DATA_RULE}
@@ -216,9 +218,11 @@ export interface ProfilePick { slug: string; why: string }
 export async function recommendForProfile(
   profile: string,
   catalog: { slug: string; title: string; genre: string; blurb: string; kind: string }[],
+  onUsage?: OnUsage,
 ): Promise<{ answer: string; picks: ProfilePick[]; aisle: string }> {
   const lines = catalog.map((t) => `${t.slug} | ${t.kind} | ${t.genre} | ${t.title} — ${t.blurb}`).join('\n');
   const out = await tool<{ answer: string; picks: ProfilePick[]; aisle: string }>({
+    onUsage,
     model: SONNET,
     name: 'profile_radar',
     maxTokens: 900,
@@ -258,8 +262,9 @@ Always reply by calling the profile_radar tool exactly once.`,
 
 // ---------- Request Box: screen visitor proposals ----------
 export interface ProposalReview { allowed: boolean; reason: string; kind: 'idea' | 'skill' | 'repo'; genre: Genre; pitch: string }
-export async function reviewProposal(input: { title: string; pitch: string; link: string }): Promise<ProposalReview> {
+export async function reviewProposal(input: { title: string; pitch: string; link: string }, onUsage?: OnUsage): Promise<ProposalReview> {
   const out = await tool<ProposalReview>({
+    onUsage,
     model: HAIKU,
     name: 'screen_proposal',
     system: `You screen the Request Box of a retro video-rental store for Claude Code skills and GitHub repos. Visitors propose a new skill to build, a repo to stock, or an idea for the community. ${DATA_RULE}
