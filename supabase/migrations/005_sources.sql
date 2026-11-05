@@ -82,7 +82,12 @@ create table if not exists public.assess_batches (
   repos text[] not null default '{}',
   collected_at timestamptz
 );
-comment on table public.assess_batches is 'Message Batches submitted to pre-assess new repos; collected_at is set once results are cached. Server-only.';
+-- Collect bookkeeping: claimed_at/status 'collecting' is the claim (retaken after 15 minutes), done lists the custom_ids already
+-- handled, reserve_ids are the ai_usage placeholders held for the batch while it is in flight (settled or deleted at collect).
+alter table public.assess_batches add column if not exists claimed_at timestamptz;
+alter table public.assess_batches add column if not exists done text[] not null default '{}';
+alter table public.assess_batches add column if not exists reserve_ids bigint[] not null default '{}';
+comment on table public.assess_batches is 'Message Batches submitted to pre-assess new repos; collected_at is set once every result is cached. Server-only.';
 
 -- Wrong admin tokens, counted in the database so the lockout holds across Edge instances: 20 in an hour (from any IP)
 -- locks every admin route for 15 minutes. A deliberate global lockout; acceptable for a single-owner admin.

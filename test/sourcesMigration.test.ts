@@ -18,6 +18,11 @@ describe('005_sources.sql', () => {
     expect(sql).toMatch(/status text not null default 'pending' check \(status in \('pending', 'approving', 'approved', 'rejected', 'stocked'\)\)/);
     expect(sql).toMatch(/unique \(repo, source, credit_url\)/);
   });
+  it('gives assess_batches the claim, done and reservation columns idempotently', () => {
+    for (const c of ['claimed_at timestamptz', "done text\\[\\] not null default '\\{\\}'", "reserve_ids bigint\\[\\] not null default '\\{\\}'"]) {
+      expect(sql).toMatch(new RegExp(`alter table public\\.assess_batches add column if not exists ${c}`));
+    }
+  });
   it('only monthly_picks is readable by anon', () => {
     expect(sql.match(/grant select on [^;]* to anon/g)).toEqual(['grant select on public.monthly_picks to anon']);
     expect(sql.match(/create policy/g)).toHaveLength(1);

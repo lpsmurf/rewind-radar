@@ -29,18 +29,36 @@ import { jsonReply } from './helpers/anthropic.ts';
 const CANDS = [{ slug: 'diagram-design', title: 'Diagram Design', genre: 'Design', blurb: 'b', kind: 'skill', match: true }];
 const writes = (d: any, table: string, op: string) => d.calls(table).filter((q: Query) => has(q, op)).map((q: Query) => arg(q, op));
 
-function setup(o: { fresh?: Record<string, unknown>[]; spent?: number; usage?: unknown[] | 'error'; pending?: any[]; insertError?: boolean } = {}) {
+function setup(o: { fresh?: Record<string, unknown>[]; spent?: number; usage?: unknown[] | 'error'; pending?: any[]; insertError?: boolean; existing?: Record<string, unknown> } = {}) {
+  // assess_batches behaves like a table: the atomic claim and the per-result bookkeeping mutate these rows.
+  const table = (o.pending ?? []).map((r) => ({ at: '2026-11-01T00:00:00Z', status: 'submitted', done: [] as string[], reserve_ids: [] as number[], collected_at: null as string | null, claimed_at: null as string | null, ...r }));
+  const ut = usageTable(o.usage ?? [], { insertError: o.insertError });
+  let nid = 100;
   db.current = fakeDb({
-    assessments: (q: Query) => (has(q, 'select') && !has(q, 'upsert') ? { data: o.fresh ?? [], error: null } : { data: null, error: null }),
+    assessments: (q: Query) => (has(q, 'upsert') ? { data: null, error: null } : has(q, 'maybeSingle') ? { data: o.existing ?? null, error: null } : has(q, 'select') ? { data: o.fresh ?? [], error: null } : { data: null, error: null }),
     'rpc:search_tapes': () => ({ data: CANDS, error: null }),
     'rpc:ai_spend_today': () => ({ data: o.spent ?? 0, error: null }),
-    ai_usage: usageTable(o.usage ?? []),
+    ai_usage: (q: Query) => (has(q, 'insert') && has(q, 'select') && !o.insertError ? { data: { id: ++nid }, error: null } : ut(q)),
     assess_batches: (q: Query) => {
       if (has(q, 'insert')) return { data: null, error: o.insertError ? { message: 'boom' } : null };
-      if (has(q, 'select')) return { data: o.pending ?? [], error: null };
+      if (has(q, 'update')) {
+        const id = q.calls.find((c) => c[0] === 'eq' && c[1] === 'id')?.[2];
+        const row = table.find((r) => r.id === id);
+        const patch = arg(q, 'update');
+        if (patch.status === 'collecting') {
+          const stale = !!row?.claimed_at && Date.parse(row.claimed_at) < Date.now() - 15 * 60_000;
+          if (!row || row.collected_at || (row.status === 'collecting' && !stale)) return { data: null, error: null };
+          Object.assign(row, patch);
+          return { data: { ...row }, error: null };
+        }
+        if (row) Object.assign(row, patch);
+        return { data: null, error: null };
+      }
+      if (has(q, 'select')) return { data: table.filter((r) => !r.collected_at).map((r) => ({ ...r })), error: null };
       return { data: null, error: null };
     },
   });
+  db.current.batchRows = table;
   return db.current;
 }
 
@@ -94,7 +112,7 @@ describe('submitAssessBatch', () => {
   it('records the batch in assess_batches', async () => {
     const d = setup();
     await submitAssessBatch(['a/b', 'c/d']);
-    expect(writes(d, 'assess_batches', 'insert')).toEqual([{ id: 'msgbatch_1', status: 'submitted', repos: ['a/b', 'c/d'] }]);
+    expect(writes(d, 'assess_batches', 'insert')).toEqual([{ id: 'msgbatch_1', status: 'submitted', repos: ['a/b', 'c/d'], reserve_ids: [101, 102] }]);
   });
   it('skips repos with a fresh assessment at the current prompt version, and submits the rest', async () => {
     setup({
@@ -125,12 +143,31 @@ describe('submitAssessBatch', () => {
     await submitAssessBatch(Array.from({ length: 40 }, (_, i) => `o/r${i}`));
     expect(batches.create.mock.calls[0][0].requests).toHaveLength(BATCH_CAP);
   });
-  it('reserves half the assess reserve per repo, then releases the placeholder once the batch exists', async () => {
+  it('reserves half the assess reserve per repo and KEEPS the placeholders while the batch is in flight', async () => {
     const d = setup();
     await submitAssessBatch(['a/b', 'c/d']);
     const ins = writes(d, 'ai_usage', 'insert');
-    expect(ins).toEqual([expect.objectContaining({ route: 'batch-assess', cost_usd: 0.12 })]); // 2 x 0.06
-    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(true);
+    expect(ins).toEqual([
+      expect.objectContaining({ route: 'batch-assess', repo: 'a/b', cost_usd: 0.06 }),
+      expect.objectContaining({ route: 'batch-assess', repo: 'c/d', cost_usd: 0.06 }),
+    ]);
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(false); // in-flight batches count against the daily budget
+    expect(writes(d, 'assess_batches', 'insert')[0].reserve_ids).toEqual([101, 102]);
+  });
+  it('releases the placeholders it already took when a later one does not fit the batch budget', async () => {
+    const d = setup();
+    let n = 0;
+    d.on('ai_usage', (q: Query) => {
+      if (has(q, 'insert')) return { data: { id: 200 + ++n }, error: null };
+      return { data: n >= 2 ? [{ id: 1, at: new Date().toISOString(), cost_usd: 1.95, repo: null }] : [], error: null };
+    });
+    expect(await submitAssessBatch(['a/b', 'c/d'])).toBeNull();
+    expect(batches.create).not.toHaveBeenCalled();
+    const gone = d.calls('ai_usage').filter((q: Query) => has(q, 'delete')).flatMap((q: Query) => {
+      const c = q.calls.find((x: any[]) => x[0] === 'in' || x[0] === 'eq')!;
+      return c[0] === 'in' ? (c[2] as number[]) : [c[2] as number];
+    });
+    expect(gone.sort()).toEqual([201, 202]);
   });
   it('skips the batch when the daily budget is spent', async () => {
     vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
@@ -148,7 +185,7 @@ describe('submitAssessBatch', () => {
     const d = setup();
     batches.create.mockRejectedValue(new Error('anthropic down'));
     await expect(submitAssessBatch(['a/b'])).resolves.toBeNull();
-    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(true);
+    expect(d.calls('ai_usage').filter((q: Query) => has(q, 'delete'))).toHaveLength(1);
     expect(writes(d, 'assess_batches', 'insert')).toHaveLength(0);
   });
 });
@@ -166,7 +203,7 @@ describe('collectAssessBatches', () => {
     batches.retrieve.mockResolvedValue({ processing_status: 'in_progress' });
     await collectAssessBatches();
     expect(batches.results).not.toHaveBeenCalled();
-    expect(writes(d, 'assess_batches', 'update')).toHaveLength(0);
+    expect(d.batchRows[0]).toMatchObject({ status: 'submitted', collected_at: null }); // claim released, not collected
   });
   it('caches each result as an assessment, whatever order they arrive in, and marks the row collected', async () => {
     const d = setup({ pending });
@@ -176,7 +213,8 @@ describe('collectAssessBatches', () => {
     const up = writes(d, 'assessments', 'upsert');
     expect(up.map((u: any) => [u.repo, u.data.title])).toEqual([['c/d', 'second'], ['a/b', 'first']]);
     expect(up[0]).toMatchObject({ model: SONNET, prompt_version: PROMPT_VERSION, facts: expect.objectContaining({ full_name: 'c/d', signals: expect.any(Object) }) });
-    expect(writes(d, 'assess_batches', 'update')).toEqual([expect.objectContaining({ status: 'ended', collected_at: expect.any(String) })]);
+    expect(writes(d, 'assess_batches', 'update').at(-1)).toEqual(expect.objectContaining({ status: 'ended', collected_at: expect.any(String) }));
+    expect(d.batchRows[0].done).toEqual(['c__d', 'a__b']);
   });
   it('normalizes and clamps like the live path: unknown overlap slugs go, nothing to clamp for a fresh MIT repo', async () => {
     const d = setup({ pending: [{ ...pending[0], repos: ['a/b'] }] });
@@ -212,7 +250,7 @@ describe('collectAssessBatches', () => {
     expect(await collectAssessBatches()).toMatchObject({ cached: 1, skipped: 3 });
     expect(writes(d, 'assessments', 'upsert').map((u: any) => u.repo)).toEqual(['g/h']);
     expect(writes(d, 'ai_usage', 'insert')).toHaveLength(1); // nothing billed for the failures
-    expect(writes(d, 'assess_batches', 'update')).toHaveLength(1);
+    expect(d.batchRows[0].collected_at).toEqual(expect.any(String)); // permanent failures do not hold the batch open
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
   });
@@ -245,6 +283,111 @@ describe('collectAssessBatches', () => {
     const d = setup({ pending });
     batches.retrieve.mockRejectedValue(new Error('anthropic down'));
     await expect(collectAssessBatches()).resolves.toMatchObject({ cached: 0 });
-    expect(writes(d, 'assess_batches', 'update')).toHaveLength(0);
+    expect(d.batchRows[0]).toMatchObject({ status: 'submitted', collected_at: null }); // claim given back
+  });
+
+  describe('claim, bookkeeping and budget', () => {
+    const withIds = [{ id: 'msgbatch_1', repos: ['a/b', 'c/d'], reserve_ids: [11, 12] }];
+    const good = (repo: string) => ok(repo, { ...SAMPLE, ai_directed_text: false });
+
+    it('claims a batch atomically before reading it: status collecting, only if not collected and not recently claimed', async () => {
+      const d = setup({ pending });
+      batches.results.mockResolvedValue(stream([good('a/b'), good('c/d')]));
+      await collectAssessBatches();
+      const claim = d.calls('assess_batches').find((q: Query) => arg(q, 'update')?.status === 'collecting')!;
+      expect(arg(claim, 'update')).toMatchObject({ status: 'collecting', claimed_at: expect.any(String) });
+      expect(claim.calls).toContainEqual(['eq', 'id', 'msgbatch_1']);
+      expect(has(claim, 'is', 'collected_at', null)).toBe(true);
+      expect((claim.calls.find((c: any[]) => c[0] === 'or') as any)[1]).toMatch(/^status\.neq\.collecting,claimed_at\.lt\./);
+      expect(claim.calls.some((c: any[]) => c[0] === 'select')).toBe(true);
+      expect(d.calls('assess_batches').indexOf(claim)).toBeLessThan(d.calls('assess_batches').findIndex((q: Query) => has(q, 'update') && arg(q, 'update').done));
+    });
+    it('two concurrent collects cannot both process the batch: one result set, one meter', async () => {
+      const d = setup({ pending: withIds });
+      batches.results.mockImplementation(async () => stream([good('a/b'), good('c/d')]));
+      await Promise.all([collectAssessBatches(), collectAssessBatches()]);
+      expect(batches.retrieve).toHaveBeenCalledTimes(1);
+      expect(writes(d, 'assessments', 'upsert')).toHaveLength(2);
+      expect(d.calls('ai_usage').filter((q: Query) => has(q, 'update'))).toHaveLength(2);
+    });
+    it('takes over a claim that is older than 15 minutes', async () => {
+      const d = setup({ pending: [{ ...withIds[0], status: 'collecting', claimed_at: new Date(Date.now() - 20 * 60_000).toISOString() }] });
+      batches.results.mockResolvedValue(stream([good('a/b'), good('c/d')]));
+      expect(await collectAssessBatches()).toMatchObject({ batches: 1, cached: 2 });
+      expect(d.batchRows[0].collected_at).toEqual(expect.any(String));
+    });
+    it('leaves a batch alone while someone else holds a fresh claim', async () => {
+      setup({ pending: [{ ...withIds[0], status: 'collecting', claimed_at: new Date().toISOString() }] });
+      expect(await collectAssessBatches()).toMatchObject({ batches: 0, cached: 0 });
+      expect(batches.retrieve).not.toHaveBeenCalled();
+    });
+    it('a re-collect skips the custom_ids already done: no second upsert, no second meter', async () => {
+      const d = setup({ pending: [{ ...withIds[0], done: ['a__b'] }] });
+      batches.results.mockResolvedValue(stream([good('a/b'), good('c/d')]));
+      expect(await collectAssessBatches()).toMatchObject({ batches: 1, cached: 1 });
+      expect(writes(d, 'assessments', 'upsert').map((u: any) => u.repo)).toEqual(['c/d']);
+      expect(d.calls('ai_usage').filter((q: Query) => has(q, 'update')).map((q: Query) => q.calls.find((c) => c[0] === 'eq')![2])).toEqual([12]);
+    });
+    it('a transient GitHub failure leaves that result out of done and the batch uncollected; the next run retries only it', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const d = setup({ pending: withIds });
+      batches.results.mockImplementation(async () => stream([good('a/b'), good('c/d')]));
+      gh.fail.add('c/d');
+      expect(await collectAssessBatches()).toMatchObject({ batches: 0, cached: 1 });
+      expect(d.batchRows[0]).toMatchObject({ done: ['a__b'], collected_at: null, status: 'ended' }); // claim released
+      expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(false); // nothing released while a retry is due
+      gh.fail.clear();
+      expect(await collectAssessBatches()).toMatchObject({ batches: 1, cached: 1 });
+      expect(writes(d, 'assessments', 'upsert').map((u: any) => u.repo)).toEqual(['a/b', 'c/d']);
+      expect(d.batchRows[0].done).toEqual(['a__b', 'c__d']);
+      expect(d.batchRows[0].collected_at).toEqual(expect.any(String));
+    });
+    it('a failing cache write is transient too', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const d = setup({ pending: [{ ...withIds[0], repos: ['a/b'], reserve_ids: [11] }] });
+      d.on('assessments', (q: Query) => (has(q, 'upsert') ? { data: null, error: { message: 'down' } } : { data: null, error: null }));
+      batches.results.mockImplementation(async () => stream([good('a/b')]));
+      await collectAssessBatches();
+      expect(d.batchRows[0]).toMatchObject({ done: [], collected_at: null });
+    });
+    it('keeps a fresher assessment: no upsert when the cached row is newer than the batch, but the result is done and metered', async () => {
+      const d = setup({ pending: [{ ...withIds[0], repos: ['a/b'], reserve_ids: [11] }], existing: { updated_at: '2026-11-03T00:00:00Z', hits: 7 } });
+      batches.results.mockResolvedValue(stream([good('a/b')]));
+      expect(await collectAssessBatches()).toMatchObject({ batches: 1, cached: 0 });
+      expect(writes(d, 'assessments', 'upsert')).toHaveLength(0);
+      expect(d.batchRows[0].done).toEqual(['a__b']);
+      expect(d.calls('ai_usage').filter((q: Query) => has(q, 'update'))).toHaveLength(1);
+    });
+    it('overwrites an older assessment and never resets its hits to 0', async () => {
+      const d = setup({ pending: [{ ...withIds[0], repos: ['a/b'], reserve_ids: [11] }], existing: { updated_at: '2026-10-01T00:00:00Z', hits: 7 } });
+      batches.results.mockResolvedValue(stream([good('a/b')]));
+      await collectAssessBatches();
+      const up = writes(d, 'assessments', 'upsert');
+      expect(up).toHaveLength(1);
+      expect(up[0]).not.toHaveProperty('hits'); // the column keeps its value on conflict (and defaults to 0 on a new row)
+    });
+    it('settles each reservation with the real half-price cost instead of adding a second row', async () => {
+      const d = setup({ pending: withIds });
+      const u = { input_tokens: 4000, output_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+      batches.results.mockResolvedValue(stream([ok('a/b', { ...SAMPLE, ai_directed_text: false }, u), good('c/d')]));
+      await collectAssessBatches();
+      expect(writes(d, 'ai_usage', 'insert')).toHaveLength(0);
+      const upd = d.calls('ai_usage').filter((q: Query) => has(q, 'update'));
+      expect(upd.map((q: Query) => q.calls.find((c) => c[0] === 'eq')![2])).toEqual([11, 12]);
+      expect(arg(upd[0], 'update')).toMatchObject({ model: SONNET, input_tokens: 4000, output_tokens: 1000 });
+      expect(arg(upd[0], 'update').cost_usd).toBeCloseTo(0.009, 10);
+    });
+    it('releases the unsettled leftovers at the final collect: failed and missing results', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const d = setup({ pending: [{ id: 'msgbatch_1', repos: ['a/b', 'c/d', 'e/f'], reserve_ids: [11, 12, 13] }] });
+      batches.results.mockResolvedValue(stream([{ custom_id: 'a__b', result: { type: 'expired' } }, good('c/d')])); // e/f never came back
+      expect(await collectAssessBatches()).toMatchObject({ batches: 1 });
+      const gone = d.calls('ai_usage').filter((q: Query) => has(q, 'delete')).flatMap((q: Query) => {
+        const c = q.calls.find((x: any[]) => x[0] === 'eq' || x[0] === 'in')!;
+        return c[0] === 'in' ? (c[2] as number[]) : [c[2] as number];
+      });
+      expect(gone.sort()).toEqual([11, 13]);
+      expect(d.calls('ai_usage').filter((q: Query) => has(q, 'update')).map((q: Query) => q.calls.find((c) => c[0] === 'eq')![2])).toEqual([12]);
+    });
   });
 });
