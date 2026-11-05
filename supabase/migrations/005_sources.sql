@@ -21,7 +21,7 @@ create table if not exists public.ingest_queue (
   credit_url text not null default '' check (char_length(credit_url) <= 500),
   credit_title text not null default '' check (char_length(credit_title) <= 200),
   credit_author text not null default '' check (char_length(credit_author) <= 120),
-  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected', 'stocked')),
+  status text not null default 'pending' check (status in ('pending', 'approving', 'approved', 'rejected', 'stocked')),
   facts jsonb,
   decided_at timestamptz,
   unique (repo, source, credit_url)

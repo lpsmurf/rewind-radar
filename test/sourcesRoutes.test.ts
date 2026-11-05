@@ -23,18 +23,27 @@ const ROW = { id: 7, source: 'youtube', repo: 'gitroomhq/postiz-app', kind: 'rep
 const REVIEW = { genre: 'Dev Workflow', blurb: 'Schedules posts.', ring: 'trial', rating: 4 };
 const writes = (d: any, table: string, op: string) => d.calls(table).filter((q: Query) => has(q, op)).map((q: Query) => arg(q, op));
 
-function setup(o: { row?: any; spent?: number; tapeInsert?: { code?: string } } = {}) {
+function setup(o: { row?: any; spent?: number; tapeInsert?: { code?: string }; tapes?: any[] } = {}) {
+  let claimed = false; // the atomic claim (update ... where status='pending') only succeeds once
   db.current = fakeDb({
     'rpc:ai_spend_today': () => ({ data: o.spent ?? 0, error: null }),
     'rpc:spend_by_day': () => ({ data: [{ day: '2026-11-05', route: 'radar', calls: 3, cost_usd: 0.02 }], error: null }),
     ai_usage: usageTable(),
     ingest_queue: (q: Query) => {
-      if (has(q, 'update')) return { data: 'row' in o && !o.row ? null : { id: 7 }, error: null };
+      if (has(q, 'update')) {
+        if (arg(q, 'update')?.status === 'approving') {
+          const row = 'row' in o ? o.row : ROW;
+          if (!row || row.status !== 'pending' || claimed) return { data: null, error: null };
+          claimed = true;
+          return { data: { ...row, status: 'approving' }, error: null };
+        }
+        return { data: 'row' in o && !o.row ? null : { id: 7 }, error: null };
+      }
       if (has(q, 'upsert')) return { data: [], error: null };
       if (has(q, 'maybeSingle')) return { data: 'row' in o ? o.row : ROW, error: null };
       return { data: [ROW], error: null };
     },
-    tapes: (q: Query) => (has(q, 'insert') ? (o.tapeInsert ? { data: null, error: { code: o.tapeInsert.code, message: 'x' } } : { data: { id: 'tape-1' }, error: null }) : { data: [], error: null }),
+    tapes: (q: Query) => (has(q, 'upsert') ? { data: { id: 'tape-1' }, error: null } : has(q, 'select') && !has(q, 'insert') && o.tapes ? { data: o.tapes, error: null } : has(q, 'insert') ? (o.tapeInsert ? { data: null, error: { code: o.tapeInsert.code, message: 'x' } } : { data: { id: 'tape-1' }, error: null }) : { data: [], error: null }),
     source_runs: (q: Query) => (has(q, 'insert') ? { data: null, error: null } : { data: [{ id: 1, source: 'web', found: 2, queued: 1, cost_usd: 0.01, error: null, at: '2026-11-04T09:00:00Z' }], error: null }),
   });
   return db.current;
@@ -123,7 +132,10 @@ describe('POST /admin/queue/:id/approve', () => {
       }),
     ]);
     expect(writes(d, 'ai_usage', 'insert').map((x: any) => x.route)).toEqual(['admin']);
-    expect(writes(d, 'ingest_queue', 'update')).toEqual([expect.objectContaining({ status: 'stocked', decided_at: expect.any(String) })]);
+    expect(writes(d, 'ingest_queue', 'update')).toEqual([
+      expect.objectContaining({ status: 'approving' }),
+      expect.objectContaining({ status: 'stocked', decided_at: expect.any(String) }),
+    ]);
   });
   it('snapshots the stars of a stocked repo, and none for one that was already in the store', async () => {
     const d = setup();
@@ -138,10 +150,46 @@ describe('POST /admin/queue/:id/approve', () => {
     expect((await call('POST', 'admin/queue/7/approve')).status).toBe(404);
     expect((await call('POST', 'admin/queue/abc/approve')).status).toBe(400);
   });
-  it('409s a row that is already stocked or rejected, without any AI call', async () => {
-    setup({ row: { ...ROW, status: 'stocked' } });
-    expect((await call('POST', 'admin/queue/7/approve')).status).toBe(409);
+  it('409s a row that is already stocked, rejected or being approved, without any AI call', async () => {
+    for (const status of ['stocked', 'rejected', 'approving']) {
+      setup({ row: { ...ROW, status } });
+      expect((await call('POST', 'admin/queue/7/approve')).status).toBe(409);
+    }
     expect(create).not.toHaveBeenCalled();
+  });
+  it('claims the row atomically (status pending -> approving) before anything is spent', async () => {
+    const d = setup();
+    await call('POST', 'admin/queue/7/approve');
+    const claim = d.calls('ingest_queue')[0];
+    expect(arg(claim, 'update')).toEqual({ status: 'approving' });
+    expect(claim.calls).toContainEqual(['eq', 'id', 7]);
+    expect(claim.calls).toContainEqual(['eq', 'status', 'pending']);
+    expect(claim.calls.some((c: any[]) => c[0] === 'select')).toBe(true);
+  });
+  it('a double approve makes one reviewRepo call and the second click gets a 409', async () => {
+    setup();
+    const [a, b] = await Promise.all([call('POST', 'admin/queue/7/approve'), call('POST', 'admin/queue/7/approve')]);
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+  it('un-archives and refreshes an archived tape (upsert on its slug), and stocks the row', async () => {
+    const d = setup({ tapes: [{ slug: 'gh-gitroomhq-postiz-app', kind: 'repo', archived: true }] });
+    const r = await call('POST', 'admin/queue/7/approve');
+    expect(r).toEqual({ status: 200, body: { ok: true, slug: 'gh-gitroomhq-postiz-app' } });
+    expect(writes(d, 'tapes', 'insert')).toHaveLength(0);
+    expect(d.calls('tapes').find((q: Query) => has(q, 'upsert'))!.calls).toContainEqual(['upsert', expect.objectContaining({ slug: 'gh-gitroomhq-postiz-app', archived: false, credit_url: 'https://youtu.be/x' }), { onConflict: 'slug' }]);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(writes(d, 'ingest_queue', 'update').at(-1)).toMatchObject({ status: 'stocked' });
+  });
+  it('marks the row stocked with the existing slug and spends nothing when the tape is already live (community slug too)', async () => {
+    const d = setup({ tapes: [{ slug: 'c-gitroomhq-postiz-app', kind: 'community', archived: false }] });
+    const r = await call('POST', 'admin/queue/7/approve');
+    expect(r).toEqual({ status: 200, body: { ok: true, slug: 'c-gitroomhq-postiz-app', existing: true } });
+    expect(create).not.toHaveBeenCalled();
+    expect(writes(d, 'ai_usage', 'insert')).toHaveLength(0);
+    expect(writes(d, 'tapes', 'insert')).toHaveLength(0);
+    expect(d.calls('tapes').some((q: Query) => has(q, 'upsert'))).toBe(false);
+    expect(writes(d, 'ingest_queue', 'update').at(-1)).toMatchObject({ status: 'stocked' });
   });
   it('503s without spending when the daily budget is gone', async () => {
     vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
@@ -149,27 +197,29 @@ describe('POST /admin/queue/:id/approve', () => {
     expect((await call('POST', 'admin/queue/7/approve')).status).toBe(503);
     expect(create).not.toHaveBeenCalled();
     expect(writes(d, 'tapes', 'insert')).toHaveLength(0);
+    expect(writes(d, 'ingest_queue', 'update').at(-1)).toMatchObject({ status: 'pending' });
   });
   it('404s when the repo has disappeared from GitHub, leaving the row pending', async () => {
     stubGitHub({});
     const d = setup();
     expect((await call('POST', 'admin/queue/7/approve')).status).toBe(404);
-    expect(writes(d, 'ingest_queue', 'update')).toHaveLength(0);
+    expect(writes(d, 'ingest_queue', 'update').at(-1)).toMatchObject({ status: 'pending' });
   });
   it('409s a tape that already exists and still marks the row stocked', async () => {
     const d = setup({ tapeInsert: { code: '23505' } });
     expect((await call('POST', 'admin/queue/7/approve')).status).toBe(409);
-    expect(writes(d, 'ingest_queue', 'update')).toEqual([expect.objectContaining({ status: 'stocked' })]);
+    expect(writes(d, 'ingest_queue', 'update').at(-1)).toMatchObject({ status: 'stocked' });
   });
-  it('500s and leaves the row pending when the review or the insert fails', async () => {
+  it('500s and puts the row back to pending when the review or the insert fails', async () => {
     create.mockRejectedValue(new Error('anthropic down'));
     const d = setup();
     expect((await call('POST', 'admin/queue/7/approve')).status).toBe(500);
-    expect(writes(d, 'ingest_queue', 'update')).toHaveLength(0);
+    expect(writes(d, 'ingest_queue', 'update').at(-1)).toMatchObject({ status: 'pending' });
+    expect(d.calls('ingest_queue').filter((q: Query) => has(q, 'update')).at(-1)!.calls).toContainEqual(['eq', 'status', 'approving']);
     create.mockResolvedValue(toolReply('review_repo', REVIEW));
     const d2 = setup({ tapeInsert: { code: '42P01' } });
     expect((await call('POST', 'admin/queue/7/approve')).status).toBe(500);
-    expect(writes(d2, 'ingest_queue', 'update')).toHaveLength(0);
+    expect(writes(d2, 'ingest_queue', 'update').at(-1)).toMatchObject({ status: 'pending' });
   });
 });
 

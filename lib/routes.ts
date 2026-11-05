@@ -465,7 +465,7 @@ export async function handle(req: Request): Promise<Response> {
 
     if (path === 'admin/queue' && req.method === 'GET') {
       const status = q.get('status') ?? 'pending';
-      if (!['pending', 'approved', 'rejected', 'stocked'].includes(status)) return json({ error: 'Bad status' }, 400);
+      if (!['pending', 'approving', 'approved', 'rejected', 'stocked'].includes(status)) return json({ error: 'Bad status' }, 400);
       const { data, error } = await db.from('ingest_queue').select('*').eq('status', status).order('at', { ascending: false }).limit(200);
       return error ? json({ error: 'Could not read the queue' }, 500) : json({ items: data ?? [] });
     }
@@ -485,24 +485,69 @@ export async function handle(req: Request): Promise<Response> {
         if (error) return json({ error: 'Could not reject' }, 500);
         return data ? json({ ok: true }) : json({ error: 'Not found' }, 404);
       }
+      // Claim the row first, atomically: a second click (or a second tab) gets nothing back and spends nothing.
+      let claimed = false;
+      const giveBack = async () => {
+        if (!claimed) return;
+        try {
+          await db.from('ingest_queue').update({ status: 'pending' }).eq('id', id).eq('status', 'approving');
+        } catch (e) {
+          console.error('[admin:approve] could not put the row back', e);
+        }
+      };
       try {
-        const { data: row, error } = await db.from('ingest_queue').select('*').eq('id', id).maybeSingle();
+        const { data: row, error } = await db.from('ingest_queue').update({ status: 'approving' }).eq('id', id).eq('status', 'pending').select('*').maybeSingle();
         if (error) throw error;
-        if (!row) return json({ error: 'Not found' }, 404);
-        if (row.status !== 'pending' && row.status !== 'approved') return json({ error: `Already ${row.status}` }, 409);
-        if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
+        if (!row) {
+          const { data: seen } = await db.from('ingest_queue').select('status').eq('id', id).maybeSingle();
+          return seen ? json({ error: `Already ${seen.status}` }, 409) : json({ error: 'Not found' }, 404);
+        }
+        claimed = true;
+        const done = () => db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
         const ref = parseRepoRef(row.repo);
+        // The tape may already exist: live means nothing to do; archived means bring it back.
+        const slugs = ref ? [`gh-${ref.owner}-${ref.repo}`, `c-${ref.owner}-${ref.repo}`].map((x) => x.toLowerCase()) : [];
+        const { data: found, error: findErr } = slugs.length ? await db.from('tapes').select('slug,kind,archived').in('slug', slugs) : { data: [], error: null };
+        if (findErr) throw findErr;
+        const live = (found ?? []).find((t: { archived: boolean }) => !t.archived);
+        if (live) {
+          const { error: e } = await done();
+          if (e) throw e;
+          claimed = false;
+          return json({ ok: true, slug: live.slug, existing: true });
+        }
+        const old = (found ?? [])[0] as { slug: string; kind: string } | undefined;
+        if (!(await budgetLeft())) {
+          await giveBack();
+          return json({ error: CLERK_LINES.budgetBusy }, 503);
+        }
         const facts = ref ? await fetchRepoFacts(ref) : null;
-        if (!facts) return json({ error: 'That repo is no longer on GitHub' }, 404);
+        if (!facts) {
+          await giveBack();
+          return json({ error: 'That repo is no longer on GitHub' }, 404);
+        }
         const review = await meter('admin', (onUsage) => reviewRepo(facts, onUsage));
         const tape = stockedTape(facts, review, { url: row.credit_url, title: row.credit_title });
-        const ins = await db.from('tapes').insert(tape).select('id').single();
-        if (ins.error && ins.error.code !== '23505') throw ins.error;
-        if (!ins.error) await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
-        await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
-        return ins.error ? json({ error: 'Already in the store' }, 409) : json({ ok: true, slug: tape.slug });
+        if (old) {
+          const { error: e } = await db.from('tapes').upsert({ ...tape, slug: old.slug, kind: old.kind }, { onConflict: 'slug' }).select('id').single();
+          if (e) throw e;
+        } else {
+          const ins = await db.from('tapes').insert(tape).select('id').single();
+          if (ins.error && ins.error.code !== '23505') throw ins.error;
+          if (ins.error) {
+            await done();
+            claimed = false;
+            return json({ error: 'Already in the store' }, 409);
+          }
+        }
+        await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
+        const { error: e } = await done();
+        if (e) throw e;
+        claimed = false;
+        return json({ ok: true, slug: old?.slug ?? tape.slug });
       } catch (e) {
         console.error('[admin:approve]', e);
+        await giveBack();
         return json({ error: 'Could not stock that tape' }, 500);
       }
     }

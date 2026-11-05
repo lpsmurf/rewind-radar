@@ -15,7 +15,7 @@ describe('005_sources.sql', () => {
   });
   it('queues candidates once per repo, source and credit link', () => {
     expect(sql).toMatch(/source text not null check \(source in \('github', 'youtube', 'web', 'manual'\)\)/);
-    expect(sql).toMatch(/status text not null default 'pending' check \(status in \('pending', 'approved', 'rejected', 'stocked'\)\)/);
+    expect(sql).toMatch(/status text not null default 'pending' check \(status in \('pending', 'approving', 'approved', 'rejected', 'stocked'\)\)/);
     expect(sql).toMatch(/unique \(repo, source, credit_url\)/);
   });
   it('only monthly_picks is readable by anon', () => {
