@@ -61,3 +61,17 @@ export function stubSearch(items: unknown[] | number) {
   });
   return urls;
 }
+
+/** stubGitHub for the fixed paths plus GitHub search (items or a status); returns every URL asked. */
+export function stubGitHubAndSearch(routes: Parameters<typeof stubGitHub>[0], items: unknown[] | number) {
+  stubGitHub(routes);
+  const plain = globalThis.fetch;
+  const urls: string[] = [];
+  vi.stubGlobal('fetch', async (input: unknown, init?: unknown) => {
+    const u = String(input);
+    if (!u.includes('/search/repositories')) return plain(input as any, init as any);
+    urls.push(u);
+    return typeof items === 'number' ? new Response('{}', { status: items }) : new Response(JSON.stringify({ items }), { status: 200 });
+  });
+  return urls;
+}

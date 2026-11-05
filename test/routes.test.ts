@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
-import { jsonReply, toolReply } from './helpers/anthropic.ts';
-import { LPSMURF, POSTIZ, searchItem, stubGitHub, stubSearch } from './helpers/github.ts';
+import { jsonReply, textReply, toolReply } from './helpers/anthropic.ts';
+import { LPSMURF, POSTIZ, searchItem, stubGitHub, stubGitHubAndSearch, stubSearch } from './helpers/github.ts';
 import { GitHubError } from '../lib/github.ts';
 
 const { create, db, gh, batch } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, gh: { real: false }, batch: { submit: vi.fn(), collect: vi.fn() } }));
@@ -27,8 +27,12 @@ vi.mock('../lib/github.ts', async (orig) => {
 import { handle } from '../lib/routes.ts';
 import { CLERK_LINES } from '../lib/clerkGuard.ts';
 import { CHAT_LINES } from '../lib/chatGuard.ts';
-import { costUsd, HAIKU, SONNET } from '../lib/ai.ts';
+import { costUsd, HAIKU, PROFILE_SCHEMA, SONNET } from '../lib/ai.ts';
 import { githubMember, SAMPLE } from './helpers/samples.ts';
+
+/** A /profile reply: Sonnet structured output is JSON text, closed schema. */
+const profileReply = (o: Partial<{ answer: string; repos: unknown[]; skills: unknown[]; aisle: string }> = {}, u?: Parameters<typeof jsonReply>[1]) =>
+  jsonReply({ answer: 'ok', repos: [], skills: [], aisle: 'counter', ...o }, u);
 
 const CANDS = [
   { slug: 'diagram-design', title: 'Diagram Design', genre: 'Design', blurb: 'Diagrams as SVG', kind: 'skill', match: true },
@@ -52,7 +56,12 @@ function setup(o: { spent?: number; inStore?: { slug: string; kind: string; genr
     'rpc:ai_spend_today': () => ({ data: o.spent ?? 0, error: null }),
     assessments: () => ({ data: null, error: null }),
     ai_usage: usageTable(),
-    tapes: (q: Query) => (has(q, 'in') ? { data: o.inStore ?? null, error: null } : { data: CANDS, error: null }),
+    // slug lookups answer inStore; /profile asks for repo-like kinds (in) and skills (eq) separately
+    tapes: (q: Query) =>
+      has(q, 'in', 'slug') ? { data: o.inStore ?? null, error: null }
+      : has(q, 'in', 'kind') ? { data: CANDS.filter((c) => c.kind !== 'skill'), error: null }
+      : has(q, 'eq', 'kind', 'skill') ? { data: CANDS.filter((c) => c.kind === 'skill'), error: null }
+      : { data: CANDS, error: null },
   });
   return db.current;
 }
@@ -354,23 +363,23 @@ describe('every Anthropic route is budget-gated and metered', () => {
     let before: string[] = [];
     create.mockImplementation(async () => {
       before = d.calls('ai_usage').map((q: Query) => (has(q, 'insert') ? 'insert' : 'other'));
-      return toolReply('profile_radar', { answer: 'Nice shelf.', picks: [], aisle: 'counter' });
+      return profileReply({ answer: 'Nice shelf.' }, { input_tokens: 1000, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
     });
     const r = await post('profile', { github: 'lpsmurf', visitorId: vid() });
     expect(r.status).toBe(200);
     expect(before).toEqual(['insert', 'other']);
-    expect(usageRoutes(d)).toMatchObject([{ route: 'profile', cost_usd: 0.06 }]);
+    expect(usageRoutes(d)).toMatchObject([{ route: 'profile', cost_usd: 0.07 }]);
     const upd = d.calls('ai_usage').filter((q: Query) => has(q, 'update'));
     expect(upd).toHaveLength(1);
     expect(arg(upd[0], 'update')).toMatchObject({ input_tokens: 1000, output_tokens: 200 });
   });
 
-  it('/profile reserves at least its worst case: ~25k input tokens (400 catalog lines + 6000-char profile) and max_tokens 900', async () => {
+  it('/profile reserves at least its worst case: ~25k input tokens (370 store lines, 20 GitHub lines, 6000-char profile) and max_tokens 1500', async () => {
     stubGitHub(PROFILE);
     const d = setup();
-    create.mockResolvedValue(toolReply('profile_radar', { answer: 'ok', picks: [], aisle: 'counter' }));
+    create.mockResolvedValue(profileReply({ answer: 'ok' }));
     await post('profile', { github: 'lpsmurf', visitorId: vid() });
-    const worst = costUsd(SONNET, { input_tokens: 25_000, output_tokens: 900, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+    const worst = costUsd(SONNET, { input_tokens: 25_000, output_tokens: 1500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
     expect(usageRoutes(d)[0].cost_usd).toBeGreaterThanOrEqual(worst);
   });
 
@@ -448,7 +457,7 @@ describe('every Anthropic route is budget-gated and metered', () => {
     it('lets a scan through under the caps', async () => {
       stubGitHub(PROFILE);
       withUsage(rows(3));
-      create.mockResolvedValue(toolReply('profile_radar', { answer: 'ok', picks: [], aisle: 'counter' }));
+      create.mockResolvedValue(profileReply({ answer: 'ok' }));
       expect((await scan()).status).toBe(200);
     });
   });
@@ -485,6 +494,183 @@ describe('every Anthropic route is budget-gated and metered', () => {
     expect(r.status).toBe(503);
     expect(create).not.toHaveBeenCalled();
     expect(d2.calls('proposals')).toHaveLength(0);
+  });
+});
+
+describe('POST /profile: repos first, then skills; store first, GitHub tops up', () => {
+  const FOUND = () => [
+    searchItem('lpsmurf/rewind-radar'), // the visitor's own
+    searchItem('lpsmurf/other-thing'), // also theirs
+    searchItem('acme/already'), // in the store
+    searchItem('acme/agent-kit', { stargazers_count: 1500 }),
+    searchItem('zed/mcp-box', { license: { spdx_id: 'AGPL-3.0' } }),
+  ];
+  const scan = () => post('profile', { github: 'lpsmurf', visitorId: vid() });
+  const sent = () => String(create.mock.calls[0][0].messages[0].content);
+  const usageRoutes = (d: any) => d.calls('ai_usage').filter((q: Query) => has(q, 'insert'));
+
+  function ready(items: unknown[] | number = FOUND()) {
+    const d = setup();
+    d.on('tapes', (q: Query) =>
+      has(q, 'in', 'slug') ? { data: [{ slug: 'gh-acme-already' }], error: null }
+      : has(q, 'in', 'kind') ? { data: CANDS.filter((c) => c.kind !== 'skill'), error: null }
+      : { data: CANDS.filter((c) => c.kind === 'skill'), error: null });
+    const urls = stubGitHubAndSearch({ ...LPSMURF }, items);
+    return { d, urls };
+  }
+
+  it('asks Sonnet through structured output with the closed schema, no tools', async () => {
+    ready();
+    create.mockResolvedValue(profileReply());
+    await scan();
+    const req = create.mock.calls[0][0];
+    expect(req.model).toBe(SONNET);
+    expect(req.tools).toBeUndefined();
+    expect(req.tool_choice).toBeUndefined();
+    expect(req.output_config.format).toEqual({ type: 'json_schema', schema: PROFILE_SCHEMA });
+    expect(Object.keys(PROFILE_SCHEMA.properties)).toEqual(['answer', 'repos', 'skills', 'aisle']);
+    const closed = (n: any): void => {
+      if (n && typeof n === 'object') {
+        if (n.type === 'object') {
+          expect(n.additionalProperties).toBe(false);
+          expect([...n.required].sort()).toEqual(Object.keys(n.properties).sort());
+        }
+        for (const k of ['minItems', 'maxItems', 'minimum', 'maximum', 'pattern']) expect(n).not.toHaveProperty(k);
+        Object.values(n).forEach(closed);
+      }
+    };
+    closed(PROFILE_SCHEMA);
+  });
+
+  it('searches GitHub from the profile (top language + topics), at most 2 queries of 10', async () => {
+    const { urls } = ready();
+    create.mockResolvedValue(profileReply());
+    await scan();
+    expect(urls.length).toBeGreaterThanOrEqual(1);
+    expect(urls.length).toBeLessThanOrEqual(2);
+    for (const u of urls) {
+      expect(new URL(u).searchParams.get('per_page')).toBe('10');
+      expect(new URL(u).searchParams.get('q')).toContain('language:HTML'); // the fixture's most common language
+    }
+    expect(new URL(urls[0]).searchParams.get('q')).toContain('ai-agent');
+  });
+
+  it('returns picks (store first), skills and the old slugs; signals come from code', async () => {
+    ready();
+    create.mockResolvedValue(
+      profileReply({
+        answer: 'You ship agents.',
+        aisle: 'Dev Workflow',
+        repos: [
+          { id: 'gh:acme/agent-kit', why: 'fills the agent gap' },
+          { id: 'gh-acme-new', why: 'fresh and relevant' },
+          { id: 'gh:zed/mcp-box', why: 'mcp' },
+        ],
+        skills: [{ slug: 'diagram-design', why: 'documents it' }],
+      }),
+    );
+    const r = await scan();
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({
+      answer: 'You ship agents.',
+      aisle: 'Dev Workflow',
+      name: 'lpsmurf',
+      kind: 'user',
+      skills: [{ slug: 'diagram-design', why: 'documents it' }],
+      slugs: ['gh-acme-new', 'diagram-design'],
+    });
+    expect(r.body.picks.map((p: any) => p.type)).toEqual(['tape', 'github', 'github']); // store first, whatever the model's order
+    expect(r.body.picks[0]).toEqual({ type: 'tape', slug: 'gh-acme-new', why: 'fresh and relevant' });
+    expect(r.body.picks[1]).toMatchObject({
+      type: 'github',
+      why: 'fills the agent gap',
+      repo: { full_name: 'acme/agent-kit', stars: 1500, license: 'MIT', signals: { licence_kind: 'permissive', stars: 1500, archived: false } },
+    });
+    expect(r.body.picks[2].repo.signals.licence_kind).toBe('copyleft');
+    expect(r.body.picks).toHaveLength(3);
+  });
+
+  it('drops every id the model invented, in repos and in skills', async () => {
+    ready();
+    create.mockResolvedValue(
+      profileReply({
+        repos: [{ id: 'gh:evil/invented', why: 'x' }, { id: 'diagram-design', why: 'a skill is not a repo' }, { id: 'nope', why: 'x' }, { id: 'gh:lpsmurf/rewind-radar', why: 'own' }],
+        skills: [{ slug: 'gh-acme-new', why: 'a repo is not a skill' }, { slug: 'ghost', why: 'x' }],
+      }),
+    );
+    const r = await scan();
+    expect(r.body.picks).toEqual([]);
+    expect(r.body.skills).toEqual([]);
+    expect(r.body.slugs).toEqual([]);
+  });
+
+  it('leaves out the visitor\'s own repos and repos already in the store before the model sees them', async () => {
+    ready();
+    create.mockResolvedValue(profileReply());
+    await scan();
+    expect(sent()).toContain('gh:acme/agent-kit');
+    expect(sent()).toContain('gh:zed/mcp-box');
+    expect(sent()).not.toContain('gh:lpsmurf/');
+    expect(sent()).not.toContain('gh:acme/already');
+  });
+
+  it('caps GitHub picks at 5 so the store picks stay first', async () => {
+    ready(Array.from({ length: 7 }, (_, i) => searchItem(`org/r${i}`)));
+    create.mockResolvedValue(profileReply({ repos: Array.from({ length: 7 }, (_, i) => ({ id: `gh:org/r${i}`, why: 'x' })) }));
+    const r = await scan();
+    expect(r.body.picks).toHaveLength(5);
+    expect(r.body.picks.every((p: any) => p.type === 'github')).toBe(true);
+  });
+
+  it('answers from the store alone when GitHub errors', async () => {
+    ready(503);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    create.mockResolvedValue(profileReply({ repos: [{ id: 'gh-acme-new', why: 'w' }], skills: [{ slug: 'diagram-design', why: 'w' }] }));
+    const r = await scan();
+    expect(r.status).toBe(200);
+    expect(sent()).not.toContain('gh:');
+    expect(r.body.picks).toEqual([{ type: 'tape', slug: 'gh-acme-new', why: 'w' }]);
+    expect(r.body.slugs).toEqual(['gh-acme-new', 'diagram-design']);
+  });
+
+  it('meters the call: a reservation, then settled with the real usage', async () => {
+    const { d } = ready();
+    create.mockResolvedValue(profileReply({}, { input_tokens: 7000, output_tokens: 300, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }));
+    await scan();
+    expect(usageRoutes(d)).toHaveLength(1);
+    expect(arg(d.calls('ai_usage').find((q: Query) => has(q, 'update'))!, 'update')).toMatchObject({ input_tokens: 7000, output_tokens: 300 });
+  });
+
+  it('still settles the cost when the model returns something unreadable', async () => {
+    const { d } = ready();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    create.mockResolvedValue(textReply('not json'));
+    expect((await scan()).status).toBe(500);
+    expect(arg(d.calls('ai_usage').find((q: Query) => has(q, 'update'))!, 'update')).toMatchObject({ input_tokens: 1000 });
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(false);
+  });
+
+  it('keeps the budget and cap refusals: no GitHub search and no Anthropic call', async () => {
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
+    const d = setup({ spent: 2 });
+    const urls = stubGitHubAndSearch({ ...LPSMURF }, FOUND());
+    expect((await scan()).status).toBe(503);
+    d.on('rpc:ai_spend_today', () => ({ data: 0, error: null }));
+    d.on('ai_usage', usageTable(Array.from({ length: 30 }, () => ({ at: new Date().toISOString(), cost_usd: 0.01 }))));
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '5');
+    expect((await scan()).status).toBe(503);
+    expect(create).not.toHaveBeenCalled();
+    expect(urls).toHaveLength(0);
+  });
+
+  it('reads the catalog as repos (newest 250) and skills (120)', async () => {
+    const { d } = ready();
+    create.mockResolvedValue(profileReply());
+    await scan();
+    const qs = d.calls('tapes').filter((q: Query) => has(q, 'eq', 'archived', false));
+    expect(qs.map((q: Query) => arg(q, 'limit')).sort()).toEqual([120, 250]);
+    expect(qs.some((q: Query) => has(q, 'in', 'kind', ['repo', 'community']))).toBe(true);
+    expect(qs.some((q: Query) => has(q, 'eq', 'kind', 'skill'))).toBe(true);
   });
 });
 
@@ -752,7 +938,7 @@ describe('the clerk is for GitHub visitors only', () => {
   it('/profile stays open to guests', async () => {
     stubGitHub({ ...LPSMURF, ...POSTIZ });
     setup();
-    create.mockResolvedValue(toolReply('profile_radar', { answer: 'ok', picks: [], aisle: 'counter' }));
+    create.mockResolvedValue(profileReply({ answer: 'ok' }));
     expect((await post('profile', { github: 'lpsmurf', visitorId: vid() })).status).toBe(200);
   });
 

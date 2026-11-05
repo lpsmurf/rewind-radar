@@ -222,10 +222,10 @@ export async function reserve(
  * Reservation defaults are the worst case, because settle() swaps the estimate for the real cost and a burst of N
  * calls could otherwise overshoot by N x (actual - estimate). Sonnet is $2 in / $10 out per 1M tokens (PRICES in ai.ts):
  * assess = ~12k input tokens (README + facts + candidates) + max_tokens 8000 = 0.024 + 0.080 = 0.104 -> 0.12;
- * profile = ~25k input tokens (400 catalog lines + 6000-char profile) + max_tokens 900 = 0.050 + 0.009 = 0.059 -> 0.06.
+ * profile = ~25k input tokens (370 store lines + 20 GitHub lines + 6000-char profile) + max_tokens 1500 = 0.050 + 0.015 = 0.065 -> 0.07.
  */
 export const ASSESS_RESERVE_USD = 0.12;
-export const PROFILE_RESERVE_USD = 0.06;
+export const PROFILE_RESERVE_USD = 0.07;
 
 const reserveAssess = (key: string) =>
   reserve('assess', {

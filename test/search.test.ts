@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { searchQuery, searchRepos, searchTerms } from '../lib/github.ts';
+import { profileQueries, searchQuery, searchRepos, searchTerms } from '../lib/github.ts';
 import { searchItem, stubSearch } from './helpers/github.ts';
 
 const qOf = (url: string) => new URL(url).searchParams.get('q')!;
@@ -104,5 +104,18 @@ describe('search cache, dedupe, errors and ceiling', () => {
     expect(urls).toHaveLength(n);
     await searchRepos('word0'); // oldest: evicted
     expect(urls).toHaveLength(n + 1);
+  });
+});
+
+describe('profileQueries', () => {
+  const r = (language: string | null, topics: string[] = []) => ({ name: 'x', language, topics });
+  it('makes at most 2 queries: top language with top topics, then the next topics', () => {
+    const qs = profileQueries({ owner: 'o', repos: [r('Go', ['mcp', 'cli']), r('Go', ['mcp', 'agent']), r('Ruby', ['rag', 'llm'])] });
+    expect(qs).toEqual([{ text: 'mcp cli', language: 'Go' }, { text: 'agent rag', language: 'Go' }]);
+  });
+  it('falls back to the second language, or to the language alone, or to nothing', () => {
+    expect(profileQueries({ owner: 'o', repos: [r('Go', ['mcp']), r('Rust')] })).toEqual([{ text: 'mcp', language: 'Go' }, { text: 'mcp', language: 'Rust' }]);
+    expect(profileQueries({ owner: 'o', repos: [r('Go')] })).toEqual([{ text: '', language: 'Go' }]);
+    expect(profileQueries({ owner: 'o', repos: [] })).toEqual([]);
   });
 });

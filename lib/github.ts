@@ -64,7 +64,11 @@ export async function searchWeekly(n = 20): Promise<RepoInfo[]> {
 }
 
 /** Read a public GitHub user (or a single repo) so the clerk can recommend tapes for it. */
-export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'repo'; name: string; text: string } | null> {
+export interface ProfileFacets {
+  owner: string;
+  repos: { name: string; language: string | null; topics: string[] }[];
+}
+export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'repo'; name: string; text: string; facets: ProfileFacets } | null> {
   const s = input.trim().replace(/^@/, '').replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, '');
   if (!/^[\w.-]+(\/[\w.-]+)?$/.test(s)) return null;
   if (s.includes('/')) {
@@ -74,6 +78,7 @@ export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'rep
       kind: 'repo',
       name: r.full_name,
       text: `REPO ${r.full_name} (${r.language ?? 'unknown'}, ${r.stars}★)\n${r.description ?? ''}\n\nREADME:\n${r.readme.slice(0, 3500)}`,
+      facets: { owner: r.full_name.split('/')[0], repos: [{ name: r.full_name.split('/')[1] ?? r.full_name, language: r.language, topics: [] }] },
     };
   }
   const u = await fetch(`https://api.github.com/users/${s}`, { headers: headers() });
@@ -88,6 +93,7 @@ export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'rep
     kind: 'user',
     name: user.login,
     text: `USER ${user.login}${user.name ? ` (${user.name})` : ''}\nbio: ${user.bio ?? ''}\npublic repos: ${user.public_repos}\n\nRecently active repos:\n${lines.join('\n')}`,
+    facets: { owner: String(user.login), repos: repos.map((x) => ({ name: String(x.name), language: x.language ?? null, topics: Array.isArray(x.topics) ? x.topics : [] })) },
   };
 }
 
@@ -349,4 +355,23 @@ export async function searchRepos(q: string, o: { limit?: number; language?: str
   })().finally(() => searching.delete(key));
   searching.set(key, p);
   return p;
+}
+
+const top = (counts: Map<string, number>, n: number) => [...counts].sort((a, b) => b[1] - a[1]).slice(0, n).map(([k]) => k);
+
+/** Up to 2 GitHub searches for a visitor: their top language with their top topics, then the next topics (or their second language). */
+export function profileQueries(f: ProfileFacets): { text: string; language: string | null }[] {
+  const langs = new Map<string, number>();
+  const topics = new Map<string, number>();
+  for (const r of f.repos) {
+    if (r.language) langs.set(r.language, (langs.get(r.language) ?? 0) + 1);
+    for (const t of r.topics) if (/^[a-z0-9][a-z0-9-]*$/.test(t)) topics.set(t, (topics.get(t) ?? 0) + 1);
+  }
+  const [lang, lang2] = top(langs, 2);
+  const tops = top(topics, 4);
+  const out: { text: string; language: string | null }[] = [];
+  if (lang || tops.length) out.push({ text: tops.slice(0, 2).join(' '), language: lang ?? null });
+  if (tops.length > 2) out.push({ text: tops.slice(2, 4).join(' '), language: lang ?? null });
+  else if (lang2 && tops.length) out.push({ text: tops.slice(0, 2).join(' '), language: lang2 });
+  return out;
 }
