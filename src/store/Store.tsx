@@ -9,6 +9,8 @@ import {
 import { activeBubble, bubbleLines, type ChatEntry } from './chat';
 import { MONTHLY_PLACEHOLDER } from './monthly';
 import { weeklyReleases } from './rooms';
+import { compactStars, formatStars } from '../lib/stars';
+import { drawPixelText, drawStarCount, textWidth } from './pixelText';
 
 export interface StoreProps {
   tapes: Tape[];
@@ -280,6 +282,11 @@ export default function Store(props: StoreProps) {
             g.fillStyle = P.ink; g.fillRect(x + 3, y + 8, 8, 1);
             g.fillStyle = t.ring ? RING_COLORS[t.ring] : P.cream; g.fillRect(x + 9, y + 15, 3, 3);
             hs.push({ x, y, w: 14, h: 20, t, src });
+            if ((t.kind === 'repo' || t.kind === 'community') && t.stars != null) { // repo stars under the box (skills have none)
+              const lab = compactStars(t.stars), ly = y + 23;
+              if (4 + textWidth(lab) <= pitch) drawStarCount(g, lab, x + 7, ly);
+              else drawPixelText(g, lab, Math.round(x + 7 - textWidth(lab) / 2), ly, P.cream);
+            }
             if (hl.has(t.id)) { any = true; if (blink) outline(x - 1, y - 1, 16, 22); }
           });
           return any;
@@ -453,7 +460,7 @@ export default function Store(props: StoreProps) {
         const hh = hs.find((h) => h.t === ht)!;
         outline(hh.x - 1, hh.y - 1, hh.w + 2, hh.h + 2, '#fff');
         const title = trunc(ht.title, 26);
-        const sub = ht.kind === 'repo' && ht.stars != null ? '* ' + ht.stars : '';
+        const sub = (ht.kind === 'repo' || ht.kind === 'community') && ht.stars != null ? '* ' + formatStars(ht.stars) : '';
         g.font = FONT;
         const w = Math.max(title.length, sub.length) * 8 + 8, h = sub ? 24 : 14;
         const tx = Math.min(Math.max(2, mp.x + 8), W - w - 2), ty = Math.min(mp.y + 10, H - h - 2);

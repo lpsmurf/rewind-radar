@@ -1,6 +1,7 @@
 import { isLinkedSkill } from '../lib/useStore';
 import type { Tape } from '../types';
 import { RING_COLORS } from '../types';
+import { starsLabel } from '../lib/stars';
 
 const KIND: Record<string, string> = {
   skill: 'SKILL', memory: 'SKILL', repo: 'NEW RELEASE', community: 'COMMUNITY', skene: 'SKILL',
@@ -23,7 +24,7 @@ export default function TapePanel({ tape, onClose, onRent, onVote }: {
         </div>
         <div className="meta">
           {tape.rating != null && <span>{'★'.repeat(Math.round(tape.rating))}{'☆'.repeat(5 - Math.round(tape.rating))}</span>}
-          {tape.stars != null && <span>★ {tape.stars}</span>}
+          {starsLabel(tape) && <span>{starsLabel(tape)}</span>}
           {tape.language && <span>{tape.language}</span>}
           <span className={'trust ' + tape.trust}>{tape.trust.toUpperCase()}</span>
         </div>
