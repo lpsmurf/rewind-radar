@@ -1,6 +1,7 @@
 import { admin } from './admin.ts';
 import { reviewRepo, type OnUsage } from './ai.ts';
 import { searchWeekly } from './github.ts';
+import { snapshotStars } from './stars.ts';
 
 async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): Promise<R[]> {
   const out: R[] = [];
@@ -41,6 +42,7 @@ export async function refreshRadar(n = 20, onUsage?: OnUsage): Promise<number> {
   });
   const { error } = await admin().from('tapes').upsert(rows, { onConflict: 'slug' });
   if (error) throw new Error(error.message);
+  await snapshotStars(repos.map((r) => ({ repo: r.full_name, stars: r.stars })));
   // Retire repos from earlier runs: they leave the wall but keep their votes.
   const keep = rows.map((r) => `"${r.slug}"`).join(',');
   const { error: e2 } = await admin().from('tapes').update({ archived: true }).eq('kind', 'repo').not('slug', 'in', `(${keep})`);

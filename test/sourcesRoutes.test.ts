@@ -123,6 +123,14 @@ describe('POST /admin/queue/:id/approve', () => {
     expect(writes(d, 'ai_usage', 'insert').map((x: any) => x.route)).toEqual(['admin']);
     expect(writes(d, 'ingest_queue', 'update')).toEqual([expect.objectContaining({ status: 'stocked', decided_at: expect.any(String) })]);
   });
+  it('snapshots the stars of a stocked repo, and none for one that was already in the store', async () => {
+    const d = setup();
+    await call('POST', 'admin/queue/7/approve');
+    expect(writes(d, 'star_snapshots', 'upsert')).toEqual([[expect.objectContaining({ repo: 'gitroomhq/postiz-app', stars: expect.any(Number), at: new Date().toISOString().slice(0, 10) })]]);
+    const d2 = setup({ tapeInsert: { code: '23505' } });
+    await call('POST', 'admin/queue/7/approve');
+    expect(writes(d2, 'star_snapshots', 'upsert')).toHaveLength(0);
+  });
   it('404s an unknown id and 400s a bad one', async () => {
     setup({ row: null });
     expect((await call('POST', 'admin/queue/7/approve')).status).toBe(404);

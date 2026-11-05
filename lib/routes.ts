@@ -7,6 +7,7 @@ import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
 import { refreshRadar } from './radar.ts';
+import { snapshotStars } from './stars.ts';
 import { SOURCES } from './sources/index.ts';
 import { liveCtx, manualSource, runSources } from './sources/pipeline.ts';
 import { stockedTape } from './sources/stock.ts';
@@ -480,6 +481,7 @@ export async function handle(req: Request): Promise<Response> {
         const tape = stockedTape(facts, review, { url: row.credit_url, title: row.credit_title });
         const ins = await db.from('tapes').insert(tape).select('id').single();
         if (ins.error && ins.error.code !== '23505') throw ins.error;
+        if (!ins.error) await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
         await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
         return ins.error ? json({ error: 'Already in the store' }, 409) : json({ ok: true, slug: tape.slug });
       } catch (e) {
