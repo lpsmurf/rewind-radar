@@ -10,6 +10,10 @@ describe('004_chat.sql', () => {
     expect(sql).toMatch(/char_length\(body\) between 1 and 140/);
     expect(sql).not.toMatch(/\bip\b|visitor_id/i);
   });
+  it('only stores light or member tiers and logins up to 39 characters', () => {
+    expect(sql).toMatch(/tier in \('light', 'member'\)/);
+    expect(sql).toMatch(/char_length\(login\) <= 39/);
+  });
   it('turns RLS on and only lets anon read recent visible rows', () => {
     expect(sql).toMatch(/alter table public\.chat_messages enable row level security/);
     expect(sql).toMatch(/using \(not hidden and at > now\(\) - interval '24 hours'\)/);

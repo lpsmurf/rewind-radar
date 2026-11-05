@@ -46,3 +46,16 @@ export function wrapBubble(text: string, width: number, maxLines = 4): string[] 
   out[maxLines - 1] = out[maxLines - 1].slice(0, width - 2).trimEnd() + '..';
   return out;
 }
+
+/** The name to show: members are signed in with GitHub (check mark); a light name is only typed in, so it says so. */
+export function chatName(login: string, tier: string): string {
+  return tier === 'member' ? `${login} ✓` : `@${login} (unverified)`;
+}
+
+export const BUBBLE_COLS = 22;
+
+/** Bubble text: the sender's name (always, so a spoofed key cannot hide who spoke), then the message. */
+export function bubbleLines(m: ChatMsg): string[] {
+  const name = chatName(m.login, m.tier);
+  return [name.length > BUBBLE_COLS ? name.slice(0, BUBBLE_COLS - 2) + '..' : name, ...wrapBubble(m.body, BUBBLE_COLS, 3)];
+}

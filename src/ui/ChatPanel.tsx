@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { gateState, type Member } from '../lib/clerkGate';
-import type { ChatEntry } from '../store/chat';
+import { chatName, type ChatEntry } from '../store/chat';
 
 export default function ChatPanel({ chat, meKey, github, member, onSend, onReport, onConnect }: {
   chat: ChatEntry[]; meKey: string; github: string | null; member: Member | null;
@@ -31,7 +31,7 @@ export default function ChatPanel({ chat, meKey, github, member, onSend, onRepor
         {chat.length === 0 && <p className="small dim">Quiet in here. Say hi!</p>}
         {chat.map((m) => (
           <p key={m.id} className={'cmsg' + (m.sender_key === meKey ? ' mine' : '')}>
-            <b>{m.login}</b> {m.body}
+            <b className={m.tier === 'member' ? 'ver' : 'unver'}>{chatName(m.login, m.tier)}</b> {m.body}
             {m.sender_key !== meKey && !gated && (
               <button className="linkbtn rep" onClick={() => onReport(m.id)} aria-label={`Report ${m.login}'s message`} title="Report">!</button>
             )}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeBubble, BUBBLE_MS, CHAT_KEEP, mergeChat, removeChat, wrapBubble, type ChatEntry, type ChatMsg } from '../src/store/chat.ts';
+import { activeBubble, bubbleLines, BUBBLE_MS, chatName, BUBBLE_COLS, CHAT_KEEP, mergeChat, removeChat, wrapBubble, type ChatEntry, type ChatMsg } from '../src/store/chat.ts';
 
 const msg = (id: number, over: Partial<ChatMsg> = {}): ChatMsg => ({ id, at: '2026-11-05T10:00:00Z', sender_key: 'a~1', login: 'octo', tier: 'light', body: `m${id}`, ...over });
 const entry = (id: number, seen = 0, over: Partial<ChatMsg> = {}): ChatEntry => ({ ...msg(id, over), seen });
@@ -68,5 +68,23 @@ describe('wrapBubble', () => {
     expect(out).toHaveLength(2);
     expect(out[1].endsWith('..')).toBe(true);
     expect(out.every((l) => l.length <= 7)).toBe(true);
+  });
+});
+
+describe('chatName and bubbleLines (a light name must not pass as verified)', () => {
+  it('marks members with a check and light visitors as unverified', () => {
+    expect(chatName('octo', 'member')).toBe('octo ✓');
+    expect(chatName('octo', 'light')).toBe('@octo (unverified)');
+    expect(chatName('octo', 'anything-else')).toBe('@octo (unverified)');
+  });
+  it('puts the name first in the bubble, then the wrapped text, within the width', () => {
+    const lines = bubbleLines(entry(1, 1, { login: 'octocat', tier: 'light', body: 'hello there everyone, how are you today' }));
+    expect(lines[0]).toBe('@octocat (unverified)');
+    expect(lines.slice(1).join(' ')).toContain('hello there');
+    expect(lines.length).toBeLessThanOrEqual(4);
+    expect(lines.every((l) => l.length <= BUBBLE_COLS)).toBe(true);
+  });
+  it('shortens a very long name', () => {
+    expect(bubbleLines(entry(1, 1, { login: 'a'.repeat(39), tier: 'light' }))[0].length).toBeLessThanOrEqual(BUBBLE_COLS);
   });
 });

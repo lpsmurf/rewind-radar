@@ -6,8 +6,8 @@ create table if not exists public.chat_messages (
   id bigint generated always as identity primary key,
   at timestamptz not null default now(),
   sender_key text not null check (char_length(sender_key) <= 80),
-  login text not null,
-  tier text not null,
+  login text not null check (char_length(login) <= 39),
+  tier text not null check (tier in ('light', 'member')),
   body text not null check (char_length(body) between 1 and 140),
   reports int not null default 0,
   hidden boolean not null default false

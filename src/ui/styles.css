@@ -119,3 +119,4 @@ textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; r
 .cmsg.mine b { color: #3ddc84; }
 .cmsg .rep { margin-left: 6px; color: #ff4d4d; text-decoration: none; }
 .chat .cerr { color: #ff4d4d; margin: 6px 0 0; }
+.cmsg b.unver { color: #fff6d5; opacity: .8; }

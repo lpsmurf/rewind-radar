@@ -6,7 +6,7 @@ import {
   bx, by, clampToFloor, findPath, inRect, keyVector, lerpRemote, stepBy, stepToward,
   type Point, type Room,
 } from './movement';
-import { activeBubble, wrapBubble, type ChatEntry } from './chat';
+import { activeBubble, bubbleLines, type ChatEntry } from './chat';
 
 export interface StoreProps {
   tapes: Tape[];
@@ -399,7 +399,7 @@ export default function Store(props: StoreProps) {
       for (const a of avs) {
         const b = activeBubble(p.chat, a.me ? p.meKey : a.v.id, wall);
         if (!b) continue;
-        const lines = wrapBubble(b.body, 18, 4);
+        const lines = bubbleLines(b);
         g.font = FONT_S;
         const bw = Math.max(...lines.map((l) => l.length)) * 6 + 6, bh = lines.length * 8 + 4;
         const feet = Math.round(a.y) - 12 - (a.me ? 18 : 10); // above the name tag (and my arrow)
