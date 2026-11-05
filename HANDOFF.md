@@ -9,62 +9,53 @@ The plan is in **docs/ROADMAP.md** (approved by Luis). It has six phases:
 5. Study Room;
 6. Hall of Fame and Candy Stand.
 
-### Phase 1 status: code done on branch `feat/clerk-assess` (commit 1ee1f98), not merged, not deployed
+### Phase 1 status: code-review fixes done on branch `feat/clerk-assess`, PR open into `main`, not merged, not deployed
 - **What it does:**
   - A GitHub repo pasted into the clerk gets an assessment card. Sonnet 5.5 writes it as structured output and it is cached for 7 days.
   - With a scanned GitHub username, the card adds a personal FIT check (Haiku).
   - Ordinary questions run on Haiku 5.5 with an `on_topic` guardrail over full-text-search candidates.
-  - Spend is metered in `ai_usage` against `AI_DAILY_BUDGET_USD` (default $5/day). Over budget, the clerk answers from search only.
-- **Code:**
-  - new `lib/assess.ts`, `lib/catalog.ts`, `lib/clerkGuard.ts` and `src/ui/AssessmentCard.tsx`;
-  - changed `lib/ai.ts`, `lib/github.ts`, `lib/routes.ts`, `ClerkDrawer`, `useStore` and `SubmitModal` (it takes `initial`).
-- **Tests:** `npm test` (Vitest, 79 tests; Anthropic, GitHub and Supabase are mocked, and any unmocked fetch throws). The tests live in `test/`; shared data is in `test/helpers/samples.ts`. Never import from another `*.test.ts`.
+  - Every route that calls Anthropic (clerk, assess, fit, profile, submit, propose, radar refresh) is metered in `ai_usage` and checked against `AI_DAILY_BUDGET_USD` (default $5/day). Over budget, the clerk answers from search only; profile/submit/propose answer 503 with an in-character line; the radar refresh skips.
+  - Sonnet assessments also have a database-backed cap: `AI_ASSESS_MAX_PER_HOUR` (default 20) and `AI_ASSESS_BUDGET_USD` (default $2/day). /profile has its own: `AI_PROFILE_MAX_PER_HOUR` (default 30) and `AI_PROFILE_BUDGET_USD` (default $1/day). The defaults live in code, so no new secrets are needed.
+- **Tests:** `npm test` (Vitest, **147 tests**; Anthropic, GitHub and Supabase are mocked, and any unmocked fetch throws). Shared data lives in `test/helpers/`. Never import from another `*.test.ts`.
 - **CI:** `.github/workflows/ci.yml` runs typecheck, test, build, sync-edge and `deno check`.
-- **Verified:**
-  - tsc, build, sync-edge and `deno check` pass.
-  - Live in the dev server, the Postiz URL gives TRIAL at 0.8 confidence with the AGPL gate, in 17 seconds.
-  - Off-topic and "ignore your rules" questions get the in-character redirect; "diagrams" gets `diagram-design` (Haiku, about 2 seconds).
-- **Still to do for Phase 1 (in order):**
-  1. Act on the code-review findings below.
-  2. Luis applies `supabase/migrations/003_clerk.sql`, through the SQL editor or `supabase link --project-ref onovfynfxuemvsrdetez` + `supabase db push`. Until then the app runs without cache or meter, and logs `[budget] spend meter unavailable`.
-  3. Luis sets the secrets: `npx supabase secrets set GITHUB_TOKEN=<fine-grained read-only public repos> AI_DAILY_BUDGET_USD=5 --project-ref onovfynfxuemvsrdetez`.
-  4. Re-verify in the dev server: a second Postiz ask is served from cache, there is an `ai_usage` row, and a FIT appears after scanning `lpsmurf`.
-  5. Push the branch, open the PR, and wait for green CI.
-  6. Deploy (`npm run deploy:api`, `npm run deploy:site`) **only when Luis says so**.
-- **Optional:** add `scripts/eval-clerk.ts`, about 30 labelled on/off-topic questions run against the real API. It costs cents and needs Luis's OK. Use it before switching `ASSESS_MODEL` to Haiku.
+- **Verified this session (2026-11-05):** `npm test` (147), `npx tsc --noEmit -p .`, `npm run build`, `bash scripts/sync-edge.sh && deno check supabase/functions/api/index.ts` all pass locally. Nothing has been run against the real Anthropic, GitHub or Supabase.
 
-### Code-review findings to fix before the PR (Sonnet review, 2026-11-05, most severe first)
-Already fixed: `search_tapes` is no longer executable by anon/public (migration 003), and CI has `permissions: contents: read`.
-The review also confirmed that migration 003 runs cleanly and idempotently on Postgres 17, that the tsquery cast is injection-safe, that the card has no XSS, and that the API request shape is valid.
-
-1. **HIGH, budget bypass.**
-   - `/profile` runs Sonnet over 400 tapes with no `budgetLeft()` check and no `recordUsage()`. `/submit` and `/propose` (Haiku) and `radar/refresh` aren't metered either.
-   - Fix: gate and meter every route that calls Anthropic, using the `meter()`/`recordUsage` pattern from the clerk route.
-2. **HIGH, spoofable rate limits.**
-   - `who = body.visitorId ?? ip`, so a fresh visitorId gets a fresh bucket.
-   - The counters live in memory per Edge isolate, the Map never shrinks, and keys have no length limit.
-   - Fix: key limits on the client IP (last `x-forwarded-for` hop) and truncate keys.
-   - Count Sonnet assessments per hour in the database (`ai_usage` rows), and give them their own smaller budget (`AI_ASSESS_BUDGET_USD`), so one attacker can't push the whole clerk into free mode.
-3. **MEDIUM, failed calls aren't metered.**
-   - `structured()` throws `AssessError` on refusal, `max_tokens` or bad JSON, and the usage is lost.
-   - Fix: attach `usage` to `AssessError` and record it in the `getAssessment` catch. Optionally cache the failure for a few minutes.
-4. **MEDIUM, fail-open.**
-   - `budgetLeft()` returns true when the meter is missing, and an error on the `assessments` select counts as a cache miss.
-   - Fix: fail closed on the Sonnet paths (an rpc error counts as over budget), and throw when the select errors. Apply migration 003 **before** deploying this code.
-5. **MEDIUM, persuasive READMEs.**
-   - Fix: clamp the ring in code from `HealthSignals` (archived → hold; no licence or more than a year since the last push → at most trial).
-   - Wrap the README in its own delimiter, so it can't forge the `HEALTH SIGNALS` or `STORE CANDIDATES` lines.
-   - Label `steps` on the card as "from the README, unverified".
-6. **MEDIUM-LOW, bare `owner/repo`.**
-   - "tcp/ip"-style questions use up the assess quota, and in free or rate-limited mode return 429 or budget messages instead of an answer.
-   - Fix: for `ref.bare`, check that the repo exists first (or that it's in `tapes`/`assessments`), and never throw for a bare ref; fall back to the ask path.
-7. **LOW, expired row + rate limit.** This returns 429 instead of the stale row; the comment in `lib/assess.ts` says it should serve stale. Fix: serve stale when the row exists.
+### Code-review findings: all 8 fixed (test-first, one commit each)
+1. **Budget bypass, fixed.** /profile, /submit, /propose and radar/refresh are budget-gated and metered through a shared `meter()` helper. /profile fails closed and has its own database cap.
+2. **Spoofable rate limits, fixed in code; one thing still to check on the deployed function.** Limits are keyed on the client IP: `cf-connecting-ip`, else the last `x-forwarded-for` hop, else 'anon'. `visitorId` is no longer used. Keys are truncated and the in-memory map is pruned. The global Sonnet limit now counts `ai_usage` rows in the database. **To check:** log the headers of one deployed request and confirm which header carries the visitor's IP on Supabase Edge (`clientKey` in `lib/routes.ts`).
+3. **Failed calls not metered, fixed.** `AssessError` carries `usage`/`model`. Usage is recorded right after the Sonnet call returns, once. Failure caching was not added.
+4. **Fail-open, fixed.** `budgetLeft({ failClosed: true })` is used on the Sonnet paths, and an error reading `assessments` now throws. The Haiku paths stay fail-open on purpose.
+5. **Persuasive READMEs, fixed.**
+   - `clampRing` applies on every fresh and cached row: archived gives hold; no licence or more than 365 days since the last push gives at most trial.
+   - The README is wrapped in `<readme>` and header lines in it are neutralised.
+   - `PROMPT_VERSION` is now 2.
+   - The card labels its steps "from the README, unverified".
+6. **Bare `owner/repo`, fixed.** The repo must exist (as a tape or on GitHub) before any quota is used. The GitHub check is cached. A bare ref never returns an error and falls back to the normal ask path.
+7. **Expired row plus rate limit, fixed.** The stale row is served instead of a 429.
 8. **Notes:**
-   - `GITHUB_TOKEN` must be public-repo read-only, because results are cached publicly.
-   - `PRICES` only knows Haiku and Sonnet. Add any model set in `CLERK_MODEL`/`ASSESS_MODEL`.
-   - Add tests for every one of the above. That's TDD: red first.
+   - `GITHUB_TOKEN` must still be public-repo read-only.
+   - `PRICES` only knows Haiku and Sonnet. An unknown model is priced as Sonnet, so add it to `PRICES` before changing `CLERK_MODEL`/`ASSESS_MODEL`.
 
-Suggested split: give items 1, 2, 4, 6 and 7 to one Sonnet implementer (routes and assess) and items 3 and 5 to another (ai and assess prompt). Their files overlap in `lib/assess.ts`, so run them one after the other, not in parallel. Then a Haiku QA pass and a Sonnet review.
+A final Sonnet review of the diff led to six more fixes, also test-first: the `cf-connecting-ip` preference, the /profile database cap, budget checks running before the per-visitor slot is spent, the clamp on cached rows, metering right after the call, and the `repoExists` cache.
+
+**Known leftovers (not fixed, low or medium):**
+- The database caps are read-then-act. A burst of parallel requests can overshoot the hourly cap or the assess budget by the size of the burst. The fix is a reservation row or an advisory lock.
+- In-memory limits are still per Edge isolate, and pruning is O(n) once the map holds more than 5000 keys.
+- The Haiku paths (clerk ask, fit, submit, propose) still fail open if the meter is broken.
+
+### Still to do for Phase 1 (Luis, in this order)
+1. **Apply `supabase/migrations/003_clerk.sql` before deploying this code**, through the SQL editor or `supabase link --project-ref onovfynfxuemvsrdetez` + `supabase db push`. The Sonnet paths now fail closed: without the migration, repo assessments and Scan my GitHub are refused, and the clerk answers from search only.
+2. Set the two secrets: `npx supabase secrets set GITHUB_TOKEN=<fine-grained, read-only, public repos> AI_DAILY_BUDGET_USD=5 --project-ref onovfynfxuemvsrdetez`. The optional caps (`AI_ASSESS_*`, `AI_PROFILE_*`) have defaults in code.
+3. Re-verify in your local dev server:
+   - a second Postiz ask is served from cache;
+   - `ai_usage` gets rows (`assess`, then `fit`/`profile`);
+   - a FIT appears after scanning `lpsmurf`;
+   - a bare question like "tcp/ip" gets a normal answer.
+
+   The cached Postiz row is prompt v1, so the first ask re-assesses it once.
+4. Merge the PR once CI is green.
+5. Deploy (`npm run deploy:api`, `npm run deploy:site`) **only when Luis says so**. Afterwards, check which IP header Supabase sets (finding 2).
+- **Optional:** add `scripts/eval-clerk.ts`, about 30 labelled on/off-topic questions run against the real API. It costs cents and needs Luis's OK. Use it before switching `ASSESS_MODEL` to Haiku.
 
 ### Phase 2 findings (already diagnosed, not started)
 - Other visitors don't move because presence shares only an aisle name (`setAisle` in `src/lib/useStore.ts`). Remote characters are drawn at fixed `anchorOf(aisle)` spots (`src/store/Store.tsx` ~L230).
