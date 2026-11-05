@@ -166,6 +166,9 @@ export const clearRepoExistsCache = () => {
   exists.clear();
   users.clear();
   inflight.clear();
+  searches.clear();
+  searching.clear();
+  searchTimes.length = 0;
 };
 
 /**
@@ -241,4 +244,109 @@ export async function fetchRepoFacts(ref: RepoRef): Promise<RepoFacts | null> {
     contents,
     readme,
   };
+}
+
+// ---------- repo search (the official Search API, never HTML scraping) ----------
+/** A repo found by search. The first nine fields are what the UI shows; forks, open_issues and created_at let healthSignals run on a hit. */
+export interface RepoHit {
+  full_name: string;
+  html_url: string;
+  description: string | null;
+  stars: number;
+  language: string | null;
+  license: string | null; // SPDX id
+  pushed_at: string;
+  archived: boolean;
+  topics: string[];
+  forks: number;
+  open_issues: number;
+  created_at: string;
+}
+
+const SEARCH_TTL = 3600_000;
+const SEARCH_MAX = 500;
+const SEARCH_PER_MINUTE = 25; // GitHub allows 30 a minute; the ceiling is per isolate
+const searches = new Map<string, { at: number; hits: RepoHit[] }>(); // insertion order = age
+const searching = new Map<string, Promise<RepoHit[]>>(); // concurrent identical searches share one call
+const searchTimes: number[] = [];
+
+const STOP = new Set(
+  ('a an and are as at be by can for from get how i in is it me my of on or that the this to want what which with you ' +
+    'need find looking something some any please skill skills tool tools repo repos github').split(' '),
+);
+
+/** Plain lowercase keywords: quotes, qualifiers (`user:x`), operators and punctuation are dropped; at most 5 distinct terms. */
+export function searchTerms(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.toLowerCase().split(/\s+/)) {
+    if (raw.includes(':')) continue; // a qualifier such as user:foo or stars:>1
+    const t = raw.replace(/[^a-z0-9+#._-]/g, '').replace(/^[-.]+|[.]+$/g, '');
+    if (t.length < 2 || STOP.has(t) || t === 'and' || t === 'or' || t === 'not' || out.includes(t)) continue;
+    out.push(t);
+    if (out.length === 5) break;
+  }
+  return out;
+}
+
+/** The full q= string. `language` is a single GitHub language name, checked before it is used as a qualifier. */
+export function searchQuery(terms: string[], language?: string | null, now = Date.now()): string {
+  const since = new Date(now - 365 * 864e5).toISOString().slice(0, 10);
+  const lang = language && /^[A-Za-z0-9+#.-]{1,30}$/.test(language) ? ` language:${language}` : '';
+  return `${terms.join(' ')}${lang} stars:>30 archived:false pushed:>${since}`.trim();
+}
+
+const toHit = (it: any): RepoHit => ({
+  full_name: String(it.full_name),
+  html_url: String(it.html_url),
+  description: it.description ?? null,
+  stars: it.stargazers_count ?? 0,
+  language: it.language ?? null,
+  license: it.license?.spdx_id && it.license.spdx_id !== 'NOASSERTION' ? it.license.spdx_id : null,
+  pushed_at: it.pushed_at ?? '',
+  archived: !!it.archived,
+  topics: Array.isArray(it.topics) ? it.topics.filter((x: unknown) => typeof x === 'string') : [],
+  forks: it.forks_count ?? 0,
+  open_issues: it.open_issues_count ?? 0,
+  created_at: it.created_at ?? '',
+});
+
+/**
+ * Top-starred, recently pushed, live repos for some keywords. Cached an hour per normalised query (bounded), identical
+ * concurrent searches share one call, and at most 25 real calls a minute leave this isolate. Never throws: a refusal
+ * (403/429/5xx), a network error or the ceiling gives [] and a warning.
+ */
+export async function searchRepos(q: string, o: { limit?: number; language?: string | null } = {}): Promise<RepoHit[]> {
+  const terms = searchTerms(q);
+  const limit = Math.min(Math.max(Math.floor(o.limit ?? 8), 1), 30);
+  if (!terms.length && !o.language) return [];
+  const key = `${terms.join(' ')}|${(o.language ?? '').toLowerCase()}|${limit}`;
+  const hit = searches.get(key);
+  if (hit && Date.now() - hit.at < SEARCH_TTL) return hit.hits;
+  const flying = searching.get(key);
+  if (flying) return flying;
+  const now = Date.now();
+  while (searchTimes.length && now - searchTimes[0] >= 60_000) searchTimes.shift();
+  if (searchTimes.length >= SEARCH_PER_MINUTE) {
+    console.warn('[github:search] per-minute ceiling reached, skipping');
+    return [];
+  }
+  searchTimes.push(now);
+  const p = (async () => {
+    try {
+      const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery(terms, o.language, now))}&sort=stars&order=desc&per_page=${limit}`;
+      const r = await fetch(url, { headers: headers() });
+      if (!r.ok) throw new GitHubError(r.status);
+      const j: any = await r.json();
+      const hits = (Array.isArray(j.items) ? j.items : []).filter((it: any) => it && it.full_name && it.html_url && !it.archived).slice(0, limit).map(toHit);
+      searches.delete(key);
+      searches.set(key, { at: Date.now(), hits });
+      if (searches.size > SEARCH_MAX) searches.delete(searches.keys().next().value as string);
+      return hits;
+    } catch (e) {
+      console.warn('[github:search] failed, continuing without GitHub results', e instanceof Error ? e.message : e);
+      return [];
+    }
+  })().finally(() => searching.delete(key));
+  searching.set(key, p);
+  return p;
 }

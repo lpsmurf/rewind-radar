@@ -32,3 +32,32 @@ export const LPSMURF = {
   '/users/lpsmurf': { body: fixture('lpsmurf-user.json') },
   '/users/lpsmurf/repos?sort=pushed&per_page=30&type=owner': { body: fixture('lpsmurf-repos.json') },
 };
+
+/** A raw GitHub search item, as /search/repositories returns it. */
+export const searchItem = (full: string, o: Record<string, unknown> = {}) => ({
+  full_name: full,
+  html_url: `https://github.com/${full}`,
+  description: `${full} does things`,
+  stargazers_count: 500,
+  language: 'TypeScript',
+  license: { spdx_id: 'MIT' },
+  pushed_at: '2026-10-20T00:00:00Z',
+  created_at: '2025-01-01T00:00:00Z',
+  archived: false,
+  topics: ['mcp'],
+  forks_count: 20,
+  open_issues_count: 5,
+  ...o,
+});
+
+/** Stub fetch so every GitHub search answers `items` (or a status); returns the URLs asked. */
+export function stubSearch(items: unknown[] | number) {
+  const urls: string[] = [];
+  vi.stubGlobal('fetch', async (input: unknown) => {
+    const u = String(input);
+    urls.push(u);
+    if (typeof items === 'number') return new Response('{}', { status: items });
+    return new Response(JSON.stringify({ items }), { status: 200 });
+  });
+  return urls;
+}
