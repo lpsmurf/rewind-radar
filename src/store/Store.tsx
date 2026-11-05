@@ -9,8 +9,9 @@ import {
 import { activeBubble, bubbleLines, type ChatEntry } from './chat';
 import { MONTHLY_PLACEHOLDER } from './monthly';
 import { weeklyReleases } from './rooms';
-import { compactStars, formatStars } from '../lib/stars';
-import { drawPixelText, drawStarCount, textWidth } from './pixelText';
+import { formatStars } from '../lib/stars';
+import { drawPixelText, drawStarCount, drawStarCountAt, ellipsize, starCountWidth, textWidth } from './pixelText';
+import { TV_RECT, WALL_SHELVES, wallSlot, wallSplit, type WallShelf } from './wall';
 
 export interface StoreProps {
   tapes: Tape[];
@@ -24,7 +25,7 @@ export interface StoreProps {
   /** The most recent month's picks, best first (empty until the first picks are built on the 1st). */
   monthly: Tape[];
   /** `source` is the back-wall shelf the tape was clicked on, when it was one of those. */
-  onTapeClick(t: Tape, source?: 'weekly' | 'monthly'): void;
+  onTapeClick(t: Tape, source?: ShelfSource): void;
   onCounterClick(): void;
   onAisleChange(aisle: Aisle, room?: RoomId): void;
   /** My position changed. `force` skips the send throttle (last step, entering a room). */
@@ -130,8 +131,8 @@ function buildStatic(room: 'store' | 'repos'): HTMLCanvasElement {
     g.fillStyle = P.yellowDark;
     g.fillRect(x, 42, w, 2); g.fillRect(x, 76, w, 3);
   };
-  wallShelf(6, 128); wallShelf(140, 88); // weekly new releases, monthly picks
-  if (room === 'repos') wallShelf(262, 90); // community picks live in the repos room only
+  wallShelf(WALL_SHELVES.weekly.x, WALL_SHELVES.weekly.w); wallShelf(WALL_SHELVES.monthly.x, WALL_SHELVES.monthly.w); // weekly new releases, monthly picks
+  if (room === 'repos') wallShelf(WALL_SHELVES.community.x, WALL_SHELVES.community.w); // community picks live in the repos room only
   // genre shelf blocks
   for (let i = 0; i < 8; i++) {
     const x = bx(i), y = by(i);
@@ -168,7 +169,8 @@ function drawPerson(g: CanvasRenderingContext2D, x: number, y: number, color: st
   }
 }
 
-interface Hit { x: number; y: number; w: number; h: number; t: Tape; src?: 'weekly' | 'monthly' }
+export type ShelfSource = 'weekly' | 'monthly' | 'community';
+interface Hit { x: number; y: number; w: number; h: number; t: Tape; src?: ShelfSource; more?: boolean }
 
 export default function Store(props: StoreProps) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -272,10 +274,11 @@ export default function Store(props: StoreProps) {
         by_['new'] = weeklyReleases(p.tapes); // both rooms show the week's releases, most stars first
 
         // face-out wall boxes
-        const faceOut = (list: Tape[], x0: number, perRow: number, src?: 'weekly' | 'monthly', pitch = 16) => {
+        const faceOut = (list: Tape[], sh: WallShelf, src: ShelfSource) => {
           let any = false;
-          list.slice(0, perRow * 2).forEach((t, i) => {
-            const x = x0 + (i % perRow) * pitch, y = i < perRow ? 22 : 56;
+          const { shown, more, firstHidden } = wallSplit(list, sh.perRow * 2);
+          shown.forEach((t, i) => {
+            const { x, y, labelY } = wallSlot(sh, i);
             g.fillStyle = coverColor(t); g.fillRect(x, y, 14, 20);
             g.fillStyle = 'rgba(255,255,255,.25)'; g.fillRect(x + 1, y + 1, 12, 2);
             g.fillStyle = P.cream; g.fillRect(x + 2, y + 6, 10, 6);
@@ -283,25 +286,31 @@ export default function Store(props: StoreProps) {
             g.fillStyle = t.ring ? RING_COLORS[t.ring] : P.cream; g.fillRect(x + 9, y + 15, 3, 3);
             hs.push({ x, y, w: 14, h: 20, t, src });
             if ((t.kind === 'repo' || t.kind === 'community') && t.stars != null) { // repo stars under the box (skills have none)
-              const lab = compactStars(t.stars), ly = y + 23;
-              if (4 + textWidth(lab) <= pitch) drawStarCount(g, lab, x + 7, ly);
-              else drawPixelText(g, lab, Math.round(x + 7 - textWidth(lab) / 2), ly, P.cream);
+              const lab = formatStars(t.stars).toUpperCase();
+              if (starCountWidth(lab) <= sh.pitch - 2) drawStarCount(g, lab, x + 7, labelY);
+              else drawPixelText(g, lab, Math.round(x + 7 - textWidth(lab) / 2), labelY, P.cream);
             }
             if (hl.has(t.id)) { any = true; if (blink) outline(x - 1, y - 1, 16, 22); }
           });
+          if (more) { // the rest are one click away in the browser
+            const tag = `+${more} MORE`, w = tag.length * 6 + 4, tx = sh.x + sh.w - w, ty = 88;
+            g.fillStyle = P.yellow; g.fillRect(tx, ty, w, 9);
+            g.font = FONT_S; g.fillStyle = P.ink; g.fillText(tag, tx + 2, ty + 2);
+            hs.push({ x: tx, y: ty, w, h: 9, t: list[firstHidden], src, more: true });
+          }
           return any;
         };
-        const hlNew = faceOut(by_['new'] ?? [], 10, 8, 'weekly', 15) || (by_['new'] ?? []).some((t) => hl.has(t.id));
-        const hlCom = room === 'repos' && faceOut(by_['community'] ?? [], 266, 5) || (room === 'repos' && (by_['community'] ?? []).some((t) => hl.has(t.id)));
+        const hlNew = faceOut(by_['new'] ?? [], WALL_SHELVES.weekly, 'weekly') || (by_['new'] ?? []).some((t) => hl.has(t.id));
+        const hlCom = room === 'repos' && faceOut(by_['community'] ?? [], WALL_SHELVES.community, 'community') || (room === 'repos' && (by_['community'] ?? []).some((t) => hl.has(t.id)));
         // monthly picks: the most recent month's top 10 (a tape here is a different object from the New Releases one, so match by id)
-        const hlMon = faceOut(p.monthly, 144, 5, 'monthly') || p.monthly.some((t) => hl.has(t.id));
+        const hlMon = faceOut(p.monthly, WALL_SHELVES.monthly, 'monthly') || p.monthly.some((t) => hl.has(t.id));
         if (!p.monthly.length) {
           g.font = FONT_S; g.fillStyle = P.cream;
-          MONTHLY_PLACEHOLDER.forEach((line, i) => g.fillText(line, 144 + Math.round((80 - line.length * 6) / 2), 34 + i * 12));
+          MONTHLY_PLACEHOLDER.forEach((line, i) => g.fillText(line, WALL_SHELVES.monthly.x0 + Math.round((80 - line.length * 6) / 2), 34 + i * 12));
         }
-        sign('WEEKLY NEW RELEASES', 70, 5, hlNew, true);
-        sign('MONTHLY PICKS', 184, 5, hlMon, true);
-        if (room === 'repos') sign('COMMUNITY PICKS', 307, 5, hlCom, true);
+        sign('WEEKLY NEW RELEASES', WALL_SHELVES.weekly.x + WALL_SHELVES.weekly.w / 2, 5, hlNew, true);
+        sign('MONTHLY PICKS', WALL_SHELVES.monthly.x + WALL_SHELVES.monthly.w / 2, 5, hlMon, true);
+        if (room === 'repos') sign('COMMUNITY PICKS', WALL_SHELVES.community.x + WALL_SHELVES.community.w / 2, 5, hlCom, true);
         if (room === 'store') sign('ARCADE →', DOOR.x + DOOR.w / 2, DOOR.y - 14, true);
         sign(room === 'store' ? 'REPOS →' : '← SKILLS', REPOS_DOOR.x + REPOS_DOOR.w / 2, REPOS_DOOR.y - 14, true);
 
@@ -324,19 +333,20 @@ export default function Store(props: StoreProps) {
         hits.current = hs;
 
         // TV
-        g.fillStyle = P.ink; g.fillRect(370, 12, 96, 68);
+        g.fillStyle = P.ink; g.fillRect(TV_RECT.x, TV_RECT.y, TV_RECT.w, TV_RECT.h);
         g.fillStyle = '#2b2b3a'; g.fillRect(372, 14, 92, 64);
         g.fillStyle = '#06210f'; g.fillRect(376, 18, 84, 52);
         g.fillStyle = P.navyDark; g.fillRect(396, 80, 44, 4); g.fillRect(410, 76, 16, 4);
         g.font = FONT;
         const tt = Math.floor(now / 2200) % Math.max(1, p.top10.length);
         const cur = p.top10[tt];
-        g.fillStyle = '#ffb000'; g.fillText('TOP 10', 380, 22);
+        g.fillStyle = '#ffb000'; g.fillText('TOP 10', 380, 21);
         g.fillStyle = '#4dff88';
         if (cur) {
-          g.fillText('#' + (tt + 1), 380, 38);
-          g.fillText(trunc(cur.title.split('/').pop() || cur.title, 10), 380, 50);
-          g.fillStyle = '#ffb000'; g.fillText(cur.stars != null ? '*' + cur.stars : 'v' + cur.votes, 380, 60);
+          g.fillText('#' + (tt + 1), 380, 33);
+          g.fillText(ellipsize((cur.title.split('/').pop() || cur.title).toUpperCase(), 10), 380, 46); // one line: 10 chars fit the screen
+          if (cur.stars != null) drawStarCountAt(g, formatStars(cur.stars).toUpperCase(), 380, 59, '#ffb000');
+          else drawPixelText(g, 'V' + cur.votes, 380, 59, '#ffb000');
         } else g.fillText('NO DATA', 380, 42);
         g.fillStyle = 'rgba(0,0,0,.28)'; for (let y = 18; y < 70; y += 2) g.fillRect(376, y, 84, 1);
         g.fillStyle = `rgba(77,255,136,${0.06 + 0.03 * Math.sin(now / 300)})`; g.fillRect(376, 18, 84, 52);
@@ -451,9 +461,10 @@ export default function Store(props: StoreProps) {
       // hover + tooltip
       const mp = mouse.current;
       let ht: Tape | null = null;
+      let moreHover = false;
       if (mp) for (let i = hs.length - 1; i >= 0; i--) {
         const h = hs[i];
-        if (mp.x >= h.x && mp.x < h.x + h.w && mp.y >= h.y && mp.y < h.y + h.h) { ht = h.t; break; }
+        if (mp.x >= h.x && mp.x < h.x + h.w && mp.y >= h.y && mp.y < h.y + h.h) { ht = h.more ? null : h.t; moreHover = !!h.more; break; }
       }
       hover.current = ht;
       if (ht && mp) {
@@ -471,7 +482,7 @@ export default function Store(props: StoreProps) {
       }
       const area = mp && room !== 'arcade' ? areaAt(mp.x, mp.y, room) : null;
       const onDoor = !!mp && doorAt(room, mp) !== null;
-      cv.style.cursor = ht || area || onDoor || cabHover.current >= 0 ? 'pointer' : 'crosshair';
+      cv.style.cursor = ht || moreHover || area || onDoor || cabHover.current >= 0 ? 'pointer' : 'crosshair';
 
       raf = requestAnimationFrame(loop);
     };

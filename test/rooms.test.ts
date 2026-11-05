@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { aisleOf, roomOfKind, roomOfTape, placeOf } from '../src/types.ts';
-import { clerkDestination, roomForAisle, weeklyReleases } from '../src/store/rooms.ts';
+import { clerkDestination, communityShelf, roomForAisle, weeklyReleases } from '../src/store/rooms.ts';
 import { tapeFixture } from './helpers/tapes.ts';
 
 describe('roomOfKind / roomOfTape', () => {
@@ -77,5 +77,14 @@ describe('weeklyReleases', () => {
     const input = [a, b];
     expect(weeklyReleases(input).map((t) => t.id)).toEqual(['b', 'a']);
     expect(input.map((t) => t.id)).toEqual(['a', 'b']);
+  });
+});
+
+describe('communityShelf', () => {
+  it('keeps only community tapes, in order', () => {
+    const a = tapeFixture({ id: 'a', kind: 'community' });
+    const b = tapeFixture({ id: 'b', kind: 'repo' });
+    const c = tapeFixture({ id: 'c', kind: 'community' });
+    expect(communityShelf([a, b, c]).map((t) => t.id)).toEqual(['a', 'c']);
   });
 });

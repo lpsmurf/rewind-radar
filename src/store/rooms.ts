@@ -25,3 +25,6 @@ export function weeklyReleases(tapes: Tape[]): Tape[] {
   const week = latestWeek(tapes);
   return tapes.filter((t) => aisleOf(t, week) === 'new' && t.kind === 'repo').sort((a, b) => (b.stars ?? 0) - (a.stars ?? 0));
 }
+
+/** The COMMUNITY PICKS shelf, in the order the tapes were loaded. */
+export const communityShelf = (tapes: Tape[]): Tape[] => tapes.filter((t) => t.kind === 'community');

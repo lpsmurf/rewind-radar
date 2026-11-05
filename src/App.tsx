@@ -4,7 +4,8 @@ import { useStore } from './lib/useStore';
 import { RING_COLORS, type Assessment, type RepoSummary, type Tape } from './types';
 import TapePanel from './ui/TapePanel';
 import ReleasesBrowser from './ui/ReleasesBrowser';
-import { weeklyReleases } from './store/rooms';
+import { communityShelf, weeklyReleases } from './store/rooms';
+import type { ShelfSource } from './store/Store';
 import ClerkDrawer from './ui/ClerkDrawer';
 import SubmitModal from './ui/SubmitModal';
 import ProposalsBoard from './ui/ProposalsBoard';
@@ -24,11 +25,11 @@ export default function App() {
 
   const cur = open ? s.tapes.find((t) => t.id === open.id) ?? open : null;
   // The weekly and monthly shelves open the full-screen browser over their own list; any other tape opens the panel.
-  const onTapeClick = (t: Tape, source?: 'weekly' | 'monthly') => {
-    const items = source === 'weekly' ? weeklyReleases(s.tapes) : source === 'monthly' ? s.monthly : [];
+  const onTapeClick = (t: Tape, source?: ShelfSource) => {
+    const items = source === 'weekly' ? weeklyReleases(s.tapes) : source === 'monthly' ? s.monthly : source === 'community' ? communityShelf(s.tapes) : [];
     const index = items.findIndex((x) => x.id === t.id);
     if (index < 0) return setOpen(t);
-    setBrowse({ items, index, title: source === 'weekly' ? 'WEEKLY NEW RELEASES' : 'MONTHLY PICKS' });
+    setBrowse({ items, index, title: source === 'weekly' ? 'WEEKLY NEW RELEASES' : source === 'monthly' ? 'MONTHLY PICKS' : 'COMMUNITY PICKS' });
   };
   const chips = s.tapes.filter((t) => s.highlighted.has(t.id));
   const openSubmit = (initial?: { title: string; url: string; note: string }) => {
