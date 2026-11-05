@@ -98,6 +98,18 @@ async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): P
   }
 }
 
+/** Today's chat moderation spend is under its own cap. Fails closed when the meter breaks. */
+async function chatBudgetLeft(): Promise<boolean> {
+  try {
+    const { data, error } = await admin().rpc('chat_spend_today');
+    if (error) throw error;
+    return Number(data ?? 0) < Number(env('AI_CHAT_BUDGET_USD') || '0.5');
+  } catch (e) {
+    console.warn('[chat] spend meter unavailable, resting', e);
+    return false;
+  }
+}
+
 /** Add up token counts when one request made several calls. */
 const sumUsage = (us: Parameters<OnUsage>[1][]): Parameters<OnUsage>[1] =>
   us.reduce((a, u) => ({
@@ -362,16 +374,15 @@ export async function handle(req: Request): Promise<Response> {
     if (limited(`chat:${idKey}`, 30) || limited('chat-ip:' + who, 60)) return json({ error: CHAT_LINES.limit }, 429);
     const checked = checkMessage(String(body.text ?? ''));
     if (!checked.ok) return json({ error: checked.reason }, 422);
-    // Haiku moderation only while the daily budget allows (and the spend meter works): over budget or a broken meter
-    // means the free checks above are all we have, per the roadmap. A moderation call that fails never posts unchecked.
-    if (await budgetLeft()) {
-      try {
-        const verdict = await meter('chat', (onUsage) => moderateChat(checked.text, onUsage));
-        if (!verdict.allowed) return json({ error: CHAT_LINES.moderated }, 422);
-      } catch (e) {
-        console.error('[chat:moderate]', e);
-        return json({ error: CHAT_LINES.busy }, 503);
-      }
+    // Moderation never switches off. Chat has its own daily budget (AI_CHAT_BUDGET_USD) so a spam wave cannot starve or
+    // outlast it; over that budget, a broken meter, or a failing moderator all mean "the chat is resting": nothing is posted.
+    if (!(await chatBudgetLeft())) return json({ error: CHAT_LINES.resting }, 503);
+    try {
+      const verdict = await meter('chat', (onUsage) => moderateChat(checked.text, onUsage));
+      if (!verdict.allowed) return json({ error: CHAT_LINES.moderated }, 422);
+    } catch (e) {
+      console.error('[chat:moderate]', e);
+      return json({ error: CHAT_LINES.busy }, 503);
     }
     try {
       const { data, error } = await admin()

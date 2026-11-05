@@ -13,6 +13,7 @@ export const CHAT_LINES = {
   moderated: "That one can't be posted here. Keep it friendly.",
   slow: 'Easy, one message every couple of seconds.',
   limit: "You've said a lot. Try again in a while.",
+  resting: 'The store chat is resting. Come back a little later.',
   busy: 'The store is too busy to check messages right now. Try again in a moment.',
   gone: 'That message is already gone.',
 } as const;

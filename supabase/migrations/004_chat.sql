@@ -59,6 +59,15 @@ end $$;
 revoke execute on function public.report_chat(bigint, text) from public, anon, authenticated;
 grant execute on function public.report_chat(bigint, text) to service_role;
 
+-- Chat moderation has its own daily budget: today's spend on route 'chat' (a function, because PostgREST caps a plain select at 1000 rows).
+create or replace function public.chat_spend_today() returns numeric
+language sql stable set search_path = public as $$
+  select coalesce(sum(cost_usd), 0) from public.ai_usage
+  where route = 'chat' and at >= (date_trunc('day', now() at time zone 'utc') at time zone 'utc');
+$$;
+revoke execute on function public.chat_spend_today() from public, anon, authenticated;
+grant execute on function public.chat_spend_today() to service_role;
+
 -- Hourly cleanup of anything older than 24 h. Skipped (not failed) when pg_cron is not installed.
 do $$ begin
   if exists (select 1 from pg_extension where extname = 'pg_cron') then

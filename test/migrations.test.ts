@@ -44,4 +44,10 @@ describe('004_chat.sql', () => {
     expect(sql).toMatch(/revoke execute on function public\.report_chat\(bigint, text\) from public, anon, authenticated/);
     expect(sql).toMatch(/grant execute on function public\.report_chat\(bigint, text\) to service_role/);
   });
+  it('sums chat spend for the day in a function only service_role may run', () => {
+    expect(sql).toMatch(/function public\.chat_spend_today\(\) returns numeric/);
+    expect(sql).toMatch(/route = 'chat'/);
+    expect(sql).toMatch(/revoke execute on function public\.chat_spend_today\(\) from public, anon, authenticated/);
+    expect(sql).toMatch(/grant execute on function public\.chat_spend_today\(\) to service_role/);
+  });
 });

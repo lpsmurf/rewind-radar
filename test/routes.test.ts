@@ -761,12 +761,12 @@ describe('visitor chat', () => {
   const say = (text: string, o: { github?: string; key?: string; ip?: string; headers?: Record<string, string> } = {}) =>
     post('chat', { text, key: o.key ?? KEY, ...(o.github === undefined ? {} : { github: o.github }) }, o.ip, o.headers);
 
-  function chatSetup(o: { spent?: number; row?: { reports: number; hidden: boolean } | null } = {}) {
-    const d = setup(o);
+  function chatSetup(o: { spent?: number; chatSpent?: number | 'error' } = {}) {
+    const d = setup({ spent: o.spent });
+    d.on('rpc:chat_spend_today', () => (o.chatSpent === 'error' ? { data: null, error: { message: 'boom' } } : { data: o.chatSpent ?? 0, error: null }));
     d.on('chat_messages', (q: Query) => {
       if (has(q, 'insert')) { const { sender_id: _private, ...row } = arg(q, 'insert'); return { data: { id: 7, at: '2026-11-05T10:00:00Z', ...row }, error: null }; } // the real .select() leaves out sender_id
       if (has(q, 'update')) return { data: null, error: null };
-      if (has(q, 'select')) return { data: o.row === undefined ? { reports: 0, hidden: false } : o.row, error: null };
       return { data: null, error: null };
     });
     return d;
@@ -871,27 +871,40 @@ describe('visitor chat', () => {
       expect(insertsOf(d)).toEqual([{ sender_key: KEY, sender_id: 'm:uid-octo', login: 'octo', tier: 'member', body: 'hi there' }]);
     });
 
-    it('over the daily budget it posts on the free checks alone: no moderation call', async () => {
-      const d = chatSetup({ spent: 99 });
+    // Flipped on purpose: this used to post on the free checks alone when the budget ran out. That meant a
+    // spam wave could drain the budget and then post unmoderated, so moderation now never switches off:
+    // chat has its own daily budget, and without it (or without a working meter) nothing is posted.
+    it('over the chat budget it rests: 503, nothing posted, no moderation call', async () => {
+      const d = chatSetup({ chatSpent: 0.5 });
       const r = await say('hello from the free tier');
-      expect(r.status).toBe(200);
+      expect(r).toEqual({ status: 503, body: { error: CHAT_LINES.resting } });
       expect(create).not.toHaveBeenCalled();
-      expect(insertsOf(d)).toHaveLength(1);
-      expect(usageOf(d)).toHaveLength(0);
-    });
-
-    it('with a broken spend meter it also falls back to the free checks', async () => {
-      const d = chatSetup();
-      d.on('rpc:ai_spend_today', () => ({ data: null, error: { message: 'boom' } }));
-      vi.spyOn(console, 'warn').mockImplementation(() => {});
-      expect((await say('hello')).status).toBe(200);
-      expect(create).not.toHaveBeenCalled();
-    });
-
-    it('still applies the free checks over budget', async () => {
-      const d = chatSetup({ spent: 99 });
-      expect((await say('https://evil.example')).status).toBe(422);
       expect(insertsOf(d)).toHaveLength(0);
+    });
+
+    it('with a broken chat spend meter it rests too (fails closed)', async () => {
+      const d = chatSetup({ chatSpent: 'error' });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      expect((await say('hello')).status).toBe(503);
+      expect(create).not.toHaveBeenCalled();
+      expect(insertsOf(d)).toHaveLength(0);
+    });
+
+    it('the chat budget is its own: AI_CHAT_BUDGET_USD (default 0.5), and the global budget does not switch chat off', async () => {
+      const d = chatSetup({ spent: 99, chatSpent: 0.49 });
+      ok();
+      expect((await say('hello')).status).toBe(200);
+      expect(create).toHaveBeenCalledTimes(1);
+      expect(insertsOf(d)).toHaveLength(1);
+      vi.stubEnv('AI_CHAT_BUDGET_USD', '0.2');
+      expect((await say('hello again', { github: 'budget-two' })).status).toBe(503);
+      vi.stubEnv('AI_CHAT_BUDGET_USD', '1');
+      expect((await say('hello once more', { github: 'budget-three' })).status).toBe(200);
+    });
+
+    it('still applies the free checks when resting (they run first, for free)', async () => {
+      chatSetup({ chatSpent: 9 });
+      expect((await say('https://evil.example')).status).toBe(422);
     });
 
     it('answers 503 and posts nothing when moderation throws', async () => {
