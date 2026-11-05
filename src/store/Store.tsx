@@ -1,13 +1,14 @@
 import { useEffect, useRef } from 'react';
-import type { Tape, Visitor, Aisle } from '../types';
-import { GENRES, aisleOf, latestWeek, RING_COLORS, PALETTE as P } from '../types';
+import type { Tape, Visitor, Aisle, Room as RoomId } from '../types';
+import { GENRES, aisleOf, latestWeek, roomOfTape, RING_COLORS, PALETTE as P } from '../types';
 import {
-  ARCADE_CABINETS, ARCADE_EXIT, ARCADE_SPAWN, BH, BW, CABINET_TOP, DOOR, H, STORE_SPAWN_FROM_ARCADE, W,
-  bx, by, clampToFloor, findPath, inRect, keyVector, lerpRemote, stepBy, stepToward,
+  ARCADE_CABINETS, ARCADE_EXIT, ARCADE_SPAWN, BH, BW, CABINET_TOP, DOOR, H, REPOS_DOOR, W,
+  bx, by, clampToFloor, doorAt, findPath, inRect, keyVector, lerpRemote, spawnFor, stepBy, stepToward,
   type Point, type Room,
 } from './movement';
 import { activeBubble, bubbleLines, type ChatEntry } from './chat';
 import { MONTHLY_PLACEHOLDER } from './monthly';
+import { weeklyReleases } from './rooms';
 
 export interface StoreProps {
   tapes: Tape[];
@@ -20,9 +21,10 @@ export interface StoreProps {
   top10: Tape[];
   /** The most recent month's picks, best first (empty until the first picks are built on the 1st). */
   monthly: Tape[];
-  onTapeClick(t: Tape): void;
+  /** `source` is the back-wall shelf the tape was clicked on, when it was one of those. */
+  onTapeClick(t: Tape, source?: 'weekly' | 'monthly'): void;
   onCounterClick(): void;
-  onAisleChange(aisle: Aisle): void;
+  onAisleChange(aisle: Aisle, room?: RoomId): void;
   /** My position changed. `force` skips the send throttle (last step, entering a room). */
   onMove(x: number, y: number, force?: boolean): void;
   onCabinetClick(): void;
@@ -53,9 +55,9 @@ function hash(s: string): number {
 const coverColor = (t: Tape) => `hsl(${hash(t.slug + (t.language ?? '')) % 360} 60% 50%)`;
 const trunc = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '.' : s);
 
-function areaAt(x: number, y: number): Aisle | null {
+function areaAt(x: number, y: number, room: Room = 'store'): Aisle | null {
   if (x >= 170 && x < 310 && y >= 218) return 'counter';
-  if (y < 108) return x < 256 ? 'new' : x < 360 ? 'community' : null;
+  if (y < 108) return x < 256 ? 'new' : x < 360 && room === 'repos' ? 'community' : null;
   if (y >= 238) return x < 70 ? 'entrance' : null;
   const row = y < 176 ? 0 : 1;
   const col = Math.min(3, Math.floor(x / 116));
@@ -64,9 +66,9 @@ function areaAt(x: number, y: number): Aisle | null {
 }
 
 /** Aisle under a walking character's feet (the strip above the shelves belongs to the wall aisles). */
-function walkArea(x: number, y: number): Aisle | null {
-  if (y < 122) return x < 256 ? 'new' : x < 360 ? 'community' : null;
-  return areaAt(x, y);
+function walkArea(x: number, y: number, room: Room): Aisle | null {
+  if (y < 122) return x < 256 ? 'new' : x < 360 && room === 'repos' ? 'community' : null;
+  return areaAt(x, y, room);
 }
 
 function iso(g: CanvasRenderingContext2D) {
@@ -96,7 +98,7 @@ function buildArcade(): HTMLCanvasElement {
   return c;
 }
 
-function buildStatic(): HTMLCanvasElement {
+function buildStatic(room: 'store' | 'repos'): HTMLCanvasElement {
   const c = document.createElement('canvas');
   c.width = W; c.height = H;
   const g = c.getContext('2d')!;
@@ -106,17 +108,28 @@ function buildStatic(): HTMLCanvasElement {
   g.fillStyle = P.navyDark; g.fillRect(0, 98, W, 6);
   g.fillStyle = P.yellow; g.fillRect(0, 104, W, 3);
   iso(g);
-  // arcade doorway
-  g.fillStyle = P.ink; g.fillRect(DOOR.x, DOOR.y, DOOR.w, DOOR.h);
-  g.fillStyle = '#ff6bd6'; g.fillRect(DOOR.x + 3, DOOR.y + 3, DOOR.w - 6, DOOR.h - 3);
-  g.fillStyle = '#12082e'; g.fillRect(DOOR.x + 6, DOOR.y + 6, DOOR.w - 12, DOOR.h - 6);
+  // doorways: the arcade (skills room only) and the other store room
+  if (room === 'store') {
+    g.fillStyle = P.ink; g.fillRect(DOOR.x, DOOR.y, DOOR.w, DOOR.h);
+    g.fillStyle = '#ff6bd6'; g.fillRect(DOOR.x + 3, DOOR.y + 3, DOOR.w - 6, DOOR.h - 3);
+    g.fillStyle = '#12082e'; g.fillRect(DOOR.x + 6, DOOR.y + 6, DOOR.w - 12, DOOR.h - 6);
+  }
+  g.fillStyle = P.ink; g.fillRect(REPOS_DOOR.x, REPOS_DOOR.y, REPOS_DOOR.w, REPOS_DOOR.h);
+  g.fillStyle = room === 'store' ? '#3ddc84' : P.yellowDark; g.fillRect(REPOS_DOOR.x + 3, REPOS_DOOR.y + 3, REPOS_DOOR.w - 6, REPOS_DOOR.h - 3);
+  g.fillStyle = P.navyDark; g.fillRect(REPOS_DOOR.x + 6, REPOS_DOOR.y + 6, REPOS_DOOR.w - 12, REPOS_DOOR.h - 6);
+  // room title painted on the floor, left of the counter
+  g.font = '16px "Press Start 2P", monospace'; g.textBaseline = 'top';
+  const title = room === 'store' ? 'SKILLS' : 'REPOS';
+  g.fillStyle = 'rgba(0,0,0,.35)'; g.fillText(title, 62, 250);
+  g.fillStyle = room === 'store' ? P.yellow : '#3ddc84'; g.fillText(title, 60, 248);
   // wall shelves (new / community)
   const wallShelf = (x: number, w: number) => {
     g.fillStyle = P.navyDark; g.fillRect(x, 18, w, 58);
     g.fillStyle = P.yellowDark;
     g.fillRect(x, 42, w, 2); g.fillRect(x, 76, w, 3);
   };
-  wallShelf(6, 128); wallShelf(140, 88); wallShelf(262, 90); // weekly new releases, monthly picks, community
+  wallShelf(6, 128); wallShelf(140, 88); // weekly new releases, monthly picks
+  if (room === 'repos') wallShelf(262, 90); // community picks live in the repos room only
   // genre shelf blocks
   for (let i = 0; i < 8; i++) {
     const x = bx(i), y = by(i);
@@ -153,7 +166,7 @@ function drawPerson(g: CanvasRenderingContext2D, x: number, y: number, color: st
   }
 }
 
-interface Hit { x: number; y: number; w: number; h: number; t: Tape }
+interface Hit { x: number; y: number; w: number; h: number; t: Tape; src?: 'weekly' | 'monthly' }
 
 export default function Store(props: StoreProps) {
   const ref = useRef<HTMLCanvasElement>(null);
@@ -173,7 +186,8 @@ export default function Store(props: StoreProps) {
   useEffect(() => {
     const cv = ref.current!;
     const g = cv.getContext('2d')!;
-    const bgStore = buildStatic();
+    const bgStore = buildStatic('store');
+    const bgRepos = buildStatic('repos');
     const bgArcade = buildArcade();
     let raf = 0;
     let last = 0;
@@ -194,8 +208,8 @@ export default function Store(props: StoreProps) {
 
     const loop = (now: number) => {
       const p = pr.current;
-      const room: Room = p.me.aisle === 'arcade' ? 'arcade' : 'store';
-      const bg = room === 'arcade' ? bgArcade : bgStore;
+      const room: Room = p.me.aisle === 'arcade' ? 'arcade' : (p.me.room ?? 'store');
+      const bg = room === 'arcade' ? bgArcade : room === 'repos' ? bgRepos : bgStore;
       const dt = Math.min(0.05, last ? (now - last) / 1000 : 0.016);
       last = now;
       const blink = Math.floor(now / 250) % 2 === 0;
@@ -251,11 +265,12 @@ export default function Store(props: StoreProps) {
       } else {
         // bucket tapes
         const by_: Record<string, Tape[]> = {};
-        const newWeek = latestWeek(p.tapes); // older repo tapes drop off the New Releases shelf into their genre aisle
+        const newWeek = latestWeek(p.tapes); // older repo tapes drop off the New Releases shelf into their genre stand (repos room)
         for (const t of p.tapes) (by_[aisleOf(t, newWeek)] ||= []).push(t);
+        by_['new'] = weeklyReleases(p.tapes); // both rooms show the week's releases, most stars first
 
         // face-out wall boxes
-        const faceOut = (list: Tape[], x0: number, perRow: number, aisle: Aisle, pitch = 16) => {
+        const faceOut = (list: Tape[], x0: number, perRow: number, src?: 'weekly' | 'monthly', pitch = 16) => {
           let any = false;
           list.slice(0, perRow * 2).forEach((t, i) => {
             const x = x0 + (i % perRow) * pitch, y = i < perRow ? 22 : 56;
@@ -264,28 +279,29 @@ export default function Store(props: StoreProps) {
             g.fillStyle = P.cream; g.fillRect(x + 2, y + 6, 10, 6);
             g.fillStyle = P.ink; g.fillRect(x + 3, y + 8, 8, 1);
             g.fillStyle = t.ring ? RING_COLORS[t.ring] : P.cream; g.fillRect(x + 9, y + 15, 3, 3);
-            hs.push({ x, y, w: 14, h: 20, t });
+            hs.push({ x, y, w: 14, h: 20, t, src });
             if (hl.has(t.id)) { any = true; if (blink) outline(x - 1, y - 1, 16, 22); }
           });
           return any;
         };
-        const hlNew = faceOut(by_['new'] ?? [], 10, 8, 'new', 15) || (by_['new'] ?? []).some((t) => hl.has(t.id));
-        const hlCom = faceOut(by_['community'] ?? [], 266, 5, 'community') || (by_['community'] ?? []).some((t) => hl.has(t.id));
+        const hlNew = faceOut(by_['new'] ?? [], 10, 8, 'weekly', 15) || (by_['new'] ?? []).some((t) => hl.has(t.id));
+        const hlCom = room === 'repos' && faceOut(by_['community'] ?? [], 266, 5) || (room === 'repos' && (by_['community'] ?? []).some((t) => hl.has(t.id)));
         // monthly picks: the most recent month's top 10 (a tape here is a different object from the New Releases one, so match by id)
-        const hlMon = faceOut(p.monthly, 144, 5, 'new') || p.monthly.some((t) => hl.has(t.id));
+        const hlMon = faceOut(p.monthly, 144, 5, 'monthly') || p.monthly.some((t) => hl.has(t.id));
         if (!p.monthly.length) {
           g.font = FONT_S; g.fillStyle = P.cream;
           MONTHLY_PLACEHOLDER.forEach((line, i) => g.fillText(line, 144 + Math.round((80 - line.length * 6) / 2), 34 + i * 12));
         }
         sign('WEEKLY NEW RELEASES', 70, 5, hlNew, true);
         sign('MONTHLY PICKS', 184, 5, hlMon, true);
-        sign('COMMUNITY PICKS', 307, 5, hlCom, true);
-        sign('ARCADE →', DOOR.x + DOOR.w / 2, DOOR.y - 14, true);
+        if (room === 'repos') sign('COMMUNITY PICKS', 307, 5, hlCom, true);
+        if (room === 'store') sign('ARCADE →', DOOR.x + DOOR.w / 2, DOOR.y - 14, true);
+        sign(room === 'store' ? 'REPOS →' : '← SKILLS', REPOS_DOOR.x + REPOS_DOOR.w / 2, REPOS_DOOR.y - 14, true);
 
         // genre aisles
         GENRES.forEach((gn, i) => {
           const x = bx(i), y = by(i);
-          const list = by_[gn] ?? [];
+          const list = (by_[gn] ?? []).filter((t) => roomOfTape(t) === room);
           const cap = Math.floor((BW - 4) / 3);
           list.slice(0, cap * 2).forEach((t, k) => {
             const lv = k < cap ? 0 : 1, j = k % cap;
@@ -331,7 +347,7 @@ export default function Store(props: StoreProps) {
       // avatars (depth-sorted)
       // me: keys win over a click-to-walk path; the clerk changing my aisle sends me to its anchor
       if (roomRef.current && roomRef.current !== room) {
-        meAt.current = { ...(room === 'arcade' ? ARCADE_SPAWN : STORE_SPAWN_FROM_ARCADE) };
+        meAt.current = { ...spawnFor(room, roomRef.current) };
         path.current = [];
         smooth.current.clear();
       }
@@ -339,7 +355,7 @@ export default function Store(props: StoreProps) {
       if (reported.current === null) reported.current = p.me.aisle;
       if (p.me.aisle !== reported.current) {
         reported.current = p.me.aisle;
-        if (room === 'store' && meAt.current) path.current = findPath(meAt.current, anchorOf(p.me.aisle), room);
+        if (room !== 'arcade' && meAt.current) path.current = findPath(meAt.current, anchorOf(p.me.aisle), room);
       }
       if (!meAt.current) {
         const anc = anchorOf(p.me.aisle);
@@ -360,14 +376,14 @@ export default function Store(props: StoreProps) {
       if (moving) p.onMove(m.x, m.y);
       else if (wasMoving) p.onMove(m.x, m.y, true);
       wasMoving = moving;
-      if (moving && room === 'store') {
-        const a = walkArea(m.x, m.y);
+      if (moving && room !== 'arcade') {
+        const a = walkArea(m.x, m.y, room);
         if (a && a !== reported.current) { reported.current = a; p.onAisleChange(a); }
       }
 
       // everyone else in this room walks toward their last broadcast position
       type Av = { v: Visitor; x: number; y: number; me: boolean; walking: boolean };
-      const inRoom = p.visitors.filter((v) => (v.aisle === 'arcade') === (room === 'arcade'));
+      const inRoom = p.visitors.filter((v) => (v.aisle === 'arcade' ? 'arcade' : (v.room ?? 'store')) === room);
       if (smooth.current.size > inRoom.length + 8) {
         const ids = new Set(inRoom.map((v) => v.id));
         for (const k of smooth.current.keys()) if (!ids.has(k)) smooth.current.delete(k);
@@ -446,8 +462,8 @@ export default function Store(props: StoreProps) {
         g.fillStyle = P.ink; g.fillText(title, tx + 4, ty + 3);
         if (sub) g.fillText(sub, tx + 4, ty + 13);
       }
-      const area = mp && room === 'store' ? areaAt(mp.x, mp.y) : null;
-      const onDoor = !!mp && (room === 'store' ? inRect(mp, DOOR) : inRect(mp, ARCADE_EXIT));
+      const area = mp && room !== 'arcade' ? areaAt(mp.x, mp.y, room) : null;
+      const onDoor = !!mp && doorAt(room, mp) !== null;
       cv.style.cursor = ht || area || onDoor || cabHover.current >= 0 ? 'pointer' : 'crosshair';
 
       raf = requestAnimationFrame(loop);
@@ -477,24 +493,25 @@ export default function Store(props: StoreProps) {
       onClick={(e) => {
         const p = pos(e);
         mouse.current = p;
-        const room: Room = props.me.aisle === 'arcade' ? 'arcade' : 'store';
+        const room: Room = props.me.aisle === 'arcade' ? 'arcade' : (props.me.room ?? 'store');
         const go = (to: Room) => {
           // Move first so the presence update that follows already carries the new room's position.
-          const spawn = to === 'arcade' ? ARCADE_SPAWN : STORE_SPAWN_FROM_ARCADE;
+          const spawn = spawnFor(to, room);
           meAt.current = { ...spawn };
           path.current = [];
           props.onMove(spawn.x, spawn.y, true);
           reported.current = to === 'arcade' ? 'arcade' : 'entrance';
-          props.onAisleChange(reported.current);
+          props.onAisleChange(reported.current, to);
         };
         if (room === 'arcade') {
           if (cabHover.current >= 0 || ARCADE_CABINETS.some((c) => p.x >= c.x && p.x < c.x + c.w && p.y >= CABINET_TOP && p.y < c.y + c.h)) return props.onCabinetClick();
-          if (inRect(p, ARCADE_EXIT)) return go('store');
+          if (doorAt('arcade', p)) return go('store');
         } else {
-          const t = [...hits.current].reverse().find((h) => p.x >= h.x && p.x < h.x + h.w && p.y >= h.y && p.y < h.y + h.h)?.t;
-          if (t) return props.onTapeClick(t);
-          if (inRect(p, DOOR)) return go('arcade');
-          if (areaAt(p.x, p.y) === 'counter') props.onCounterClick();
+          const h = [...hits.current].reverse().find((h) => p.x >= h.x && p.x < h.x + h.w && p.y >= h.y && p.y < h.y + h.h);
+          if (h) return props.onTapeClick(h.t, h.src);
+          const to = doorAt(room, p);
+          if (to) return go(to);
+          if (areaAt(p.x, p.y, room) === 'counter') props.onCounterClick();
         }
         if (meAt.current) path.current = findPath(meAt.current, p, room);
       }}

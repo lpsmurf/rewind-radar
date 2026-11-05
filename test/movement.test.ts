@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ARCADE_CABINETS, ARCADE_EXIT, DOOR, FLOOR, SHELVES, clampToFloor, createSendGate, inRect, isWalkable,
+  ARCADE_CABINETS, ARCADE_EXIT, ARCADE_SPAWN, DOOR, FLOOR, REPOS_DOOR, SHELVES, STORE_SPAWN_FROM_ARCADE,
+  clampToFloor, createSendGate, doorAt, doorsIn, inRect, isWalkable, obstaclesIn, spawnFor,
   findPath, keyVector, lerpRemote, stepBy, stepToward,
 } from '../src/store/movement.ts';
 
@@ -202,5 +203,59 @@ describe('doors', () => {
   it('keeps both doors on walkable floor', () => {
     expect(isWalkable({ x: DOOR.x + DOOR.w / 2, y: DOOR.y + DOOR.h - 2 })).toBe(true);
     expect(isWalkable({ x: ARCADE_EXIT.x + ARCADE_EXIT.w / 2, y: ARCADE_EXIT.y + ARCADE_EXIT.h - 2 }, 'arcade')).toBe(true);
+  });
+});
+
+describe('rooms: the repos room has the same layout as the skills room', () => {
+  it('shares obstacles with the skills room, and arcade keeps its cabinets', () => {
+    expect(obstaclesIn('repos')).toEqual(SHELVES);
+    expect(obstaclesIn('store')).toEqual(SHELVES);
+    expect(obstaclesIn('arcade')).toEqual(ARCADE_CABINETS);
+  });
+  it('walls block in the repos room too', () => {
+    const s = SHELVES[3];
+    expect(isWalkable({ x: s.x + 10, y: s.y + 5 }, 'repos')).toBe(false);
+    expect(isWalkable({ x: 60, y: 165 }, 'repos')).toBe(true);
+    const p = clampToFloor({ x: s.x + s.w / 2, y: s.y + s.h / 2 }, 'repos');
+    expect(inside(p, s)).toBe(false);
+  });
+  it('doors: skills has ARCADE and REPOS, repos has SKILLS, arcade has the exit', () => {
+    expect(doorsIn('store').map((d) => d.to).sort()).toEqual(['arcade', 'repos']);
+    expect(doorsIn('repos').map((d) => d.to)).toEqual(['store']);
+    expect(doorsIn('arcade').map((d) => d.to)).toEqual(['store']);
+  });
+  it('every door sits on the floor, clear of shelves, and the doors do not overlap', () => {
+    for (const room of ['store', 'repos', 'arcade'] as const) {
+      const ds = doorsIn(room);
+      for (const d of ds) {
+        expect(d.rect.y).toBeGreaterThanOrEqual(FLOOR.y);
+        expect(d.rect.x + d.rect.w).toBeLessThanOrEqual(FLOOR.x + FLOOR.w);
+        for (const o of obstaclesIn(room)) {
+          const overlap = d.rect.x < o.x + o.w && d.rect.x + d.rect.w > o.x && d.rect.y < o.y + o.h && d.rect.y + d.rect.h > o.y;
+          expect(overlap).toBe(false);
+        }
+      }
+      if (ds.length === 2) {
+        const [a, b] = ds.map((d) => d.rect);
+        expect(a.x < b.x + b.w && a.x + a.w > b.x).toBe(false);
+      }
+    }
+  });
+  it('doorAt finds the door under a point', () => {
+    expect(doorAt('store', { x: DOOR.x + 5, y: DOOR.y + 5 })).toBe('arcade');
+    expect(doorAt('store', { x: REPOS_DOOR.x + 5, y: REPOS_DOOR.y + 5 })).toBe('repos');
+    expect(doorAt('repos', { x: REPOS_DOOR.x + 5, y: REPOS_DOOR.y + 5 })).toBe('store');
+    expect(doorAt('repos', { x: DOOR.x + 5, y: DOOR.y + 5 })).toBeNull(); // no arcade door in the repos room
+    expect(doorAt('arcade', { x: ARCADE_EXIT.x + 5, y: ARCADE_EXIT.y + 5 })).toBe('store');
+    expect(doorAt('store', { x: 200, y: 165 })).toBeNull();
+  });
+  it('spawnFor puts you at the door you came through, on walkable floor', () => {
+    expect(spawnFor('arcade', 'store')).toEqual(ARCADE_SPAWN);
+    expect(spawnFor('store', 'arcade')).toEqual(STORE_SPAWN_FROM_ARCADE);
+    expect(spawnFor('repos', 'store').x).toBeGreaterThan(REPOS_DOOR.x);
+    expect(spawnFor('store', 'repos').x).toBeGreaterThan(REPOS_DOOR.x);
+    for (const [to, from] of [['repos', 'store'], ['store', 'repos'], ['store', 'arcade'], ['arcade', 'store']] as const) {
+      expect(isWalkable(spawnFor(to, from), to)).toBe(true);
+    }
   });
 });

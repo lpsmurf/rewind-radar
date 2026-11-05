@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API, API_ABS } from './api';
-import type { Aisle, ClerkReply, Proposal, Tape, Visitor } from '../types';
-import { GENRES } from '../types';
+import type { Aisle, ClerkReply, Proposal, Room, Tape, Visitor } from '../types';
+import { GENRES, latestWeek } from '../types';
 import { MOCK_TAPES } from '../data/mock';
 import { sb } from './supabase';
 import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './clerkGate';
 import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
 import { createSendGate } from '../store/movement';
+import { clerkDestination, roomForAisle } from '../store/rooms';
 import { acceptMove, rememberPos } from '../store/remote';
 import { backoffMs, createTrackGate, handleChannelStatus, visitorsFromPresence, type PresencePayload } from '../store/presence';
 import { joinPicks, latestPicks, type PickRow } from '../store/monthly';
@@ -37,6 +38,8 @@ export function useStore() {
   const visitorsRef = useRef<Visitor[]>([]);
   const gateRef = useRef(createSendGate());
   const [aisle, setAisleState] = useState<Aisle>('entrance');
+  const [room, setRoomState] = useState<Room>('store');
+  const roomRef = useRef<Room>('store');
   const [tapes, setTapes] = useState<Tape[]>(sb ? [] : MOCK_TAPES);
   const [visitors, setVisitors] = useState<Visitor[]>([]);
   const [monthly, setMonthly] = useState<Tape[]>([]);
@@ -66,7 +69,7 @@ export function useStore() {
     toastTimer.current = window.setTimeout(() => setToast(null), 3500);
   }, []);
 
-  const me = useMemo<Visitor>(() => ({ ...meRef.current, aisle }), [aisle]);
+  const me = useMemo<Visitor>(() => ({ ...meRef.current, aisle, room }), [aisle, room]);
 
   // The Supabase session (GitHub sign-in): lets members use the clerk with higher limits.
   useEffect(() => {
@@ -209,14 +212,23 @@ export function useStore() {
     };
   }, []);
 
-  const setAisle = useCallback((a: Aisle) => {
+  const setAisle = useCallback((a: Aisle, toRoom?: Room) => {
+    const r = roomForAisle(a, toRoom, roomRef.current);
+    roomRef.current = r;
+    setRoomState(r);
     setAisleState(a);
     const m = meRef.current;
     // Only the room is presence: tracking per aisle trips the server's rate limit and closes the channel.
-    const next: PresencePayload = { name: m.name, color: m.color, room: a === 'arcade' ? 'arcade' : 'store' };
+    const next: PresencePayload = { name: m.name, color: m.color, room: r };
     presenceRef.current = next;
     gateRef2.current.update(next);
   }, []);
+
+  /** The clerk's aisle: the room comes from the kind of the tapes it recommends. */
+  const goToAisle = useCallback((a: Aisle, recommended: Tape[]) => {
+    const d = clerkDestination(a, recommended, latestWeek(tapesRef.current), roomRef.current);
+    setAisle(d.aisle, d.room);
+  }, [setAisle]);
 
   /** Broadcast my position (throttled to about 8/s). `force` is for the last step and for entering a room. */
   const move = useCallback((x: number, y: number, force = false) => {
@@ -283,7 +295,7 @@ export function useStore() {
         const t = { ...j, votes: 0 } as Tape;
         setTapes((ts) => (ts.some((x) => x.id === t.id) ? ts : [t, ...ts]));
         setHighlighted(new Set([t.id]));
-        setAisle('community');
+        setAisle('community', 'repos');
         say('Tape accepted! It is on the community shelf.');
         return true;
       } catch {
@@ -316,13 +328,13 @@ export function useStore() {
         const slugs: string[] = [...(j.slugs ?? []), ...(j.in_store ? [j.in_store] : [])];
         setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
         const valid = ['new', 'community', 'counter', 'entrance', ...GENRES];
-        if (valid.includes(j.aisle)) setAisle(j.aisle as Aisle);
+        if (valid.includes(j.aisle)) goToAisle(j.aisle as Aisle, tapesRef.current.filter((t) => slugs.includes(t.slug)));
         return { ...j, answer: j.answer ?? '', slugs: j.slugs ?? [], aisle: j.aisle ?? 'counter' } as ClerkReply;
       } catch {
         return onBreak();
       }
     },
-    [setAisle],
+    [goToAisle],
   );
 
   const scanProfile = useCallback(
@@ -343,14 +355,14 @@ export function useStore() {
         const slugs = picks.map((p) => p.slug);
         setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
         const valid = ['new', 'community', 'counter', 'entrance', ...GENRES];
-        if (valid.includes(j.aisle)) setAisle(j.aisle as Aisle);
+        if (valid.includes(j.aisle)) goToAisle(j.aisle as Aisle, tapesRef.current.filter((t) => slugs.includes(t.slug)));
         const title = (slug: string) => tapesRef.current.find((t) => t.slug === slug)?.title ?? slug;
         return [`RADAR FOR ${String(j.name ?? github).toUpperCase()}: ${j.answer ?? ''}`, ...picks.map((p) => `★ ${title(p.slug)} — ${p.why}`)].join('\n');
       } catch {
         return 'The clerk is on break.';
       }
     },
-    [setAisle],
+    [goToAisle],
   );
 
   const propose = useCallback(
