@@ -1,11 +1,11 @@
 import { admin } from './admin.ts';
 import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
-import { candidates } from './catalog.ts';
+import { candidates, inStore } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
-import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
+import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef, searchRepos, type RepoHit } from './github.ts';
 import { collectAssessBatches, submitAssessBatch } from './batchAssess.ts';
 import { buildMonthlyPicks, previousMonth } from './monthly.ts';
 import { refreshRadar } from './radar.ts';
@@ -135,6 +135,22 @@ function clientKey(req: Request): string {
 // CLERK_MAX_PER_HOUR is a per-isolate ceiling on every clerk Anthropic call, whoever asks.
 const clerkCeiling = (dry = false) => limited('ceiling:clerk', Number(env('CLERK_MAX_PER_HOUR') || '300'), dry);
 
+// GitHub top-up searches (store first, GitHub for gaps): per identity and per IP, per hour.
+const GH_TOPUP = { ident: 20, ip: 40 };
+const STORE_ENOUGH = 3; // store text matches that make a GitHub search unnecessary
+
+/** GitHub repos for a question the store answers weakly. [] when the store is enough, the visitor is over a limit, or GitHub is unavailable. */
+async function githubTopUp(text: string, rows: { match?: boolean }[], who: string, idKey: string): Promise<RepoHit[]> {
+  if (rows.filter((r) => r.match).length >= STORE_ENOUGH) return [];
+  if (limited('ghsearch:' + who, GH_TOPUP.ip, true) || limited(`ghsearch:${idKey}`, GH_TOPUP.ident, true)) return [];
+  limited('ghsearch:' + who, GH_TOPUP.ip);
+  limited(`ghsearch:${idKey}`, GH_TOPUP.ident);
+  const hits = await searchRepos(text, { limit: 8 }); // never throws
+  if (!hits.length) return [];
+  const have = await inStore(hits);
+  return hits.filter((h) => !have.has(h.full_name.toLowerCase()));
+}
+
 const CLERK_LIMITS = {
   light: { ask: 15, assess: 5, ipAsk: 15, ipAssess: 5 },
   member: { ask: 40, assess: 10, ipAsk: 60, ipAssess: 10 },
@@ -245,9 +261,10 @@ export async function handle(req: Request): Promise<Response> {
         if (!hits.length) return json({ answer: CLERK_LINES.freeNone, ...plain });
         return json({ answer: CLERK_LINES.free, slugs: hits.map((r) => r.slug), aisle: aisleOf(hits[0] as Parameters<typeof aisleOf>[0]) });
       }
-      const out = await meter('clerk', (onUsage) => clerk(text, rows, onUsage));
+      const extra = await githubTopUp(text, rows, who, idKey);
+      const out = await meter('clerk', (onUsage) => clerk(text, rows, onUsage, extra));
       if (!out.on_topic) return json({ answer: CLERK_LINES.offTopic, ...plain });
-      return json({ answer: out.answer, slugs: out.slugs, aisle: out.aisle });
+      return json({ answer: out.answer, slugs: out.slugs, aisle: out.aisle, github: out.github });
     } catch (e) {
       console.error('[clerk]', e);
       return json({ error: 'The clerk is on break.' }, 500);

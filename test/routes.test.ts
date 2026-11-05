@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { jsonReply, toolReply } from './helpers/anthropic.ts';
-import { LPSMURF, POSTIZ, stubGitHub } from './helpers/github.ts';
+import { LPSMURF, POSTIZ, searchItem, stubGitHub, stubSearch } from './helpers/github.ts';
 import { GitHubError } from '../lib/github.ts';
 
 const { create, db, gh, batch } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, gh: { real: false }, batch: { submit: vi.fn(), collect: vi.fn() } }));
@@ -76,7 +76,7 @@ describe('POST /clerk: plain questions', () => {
     const d = setup();
     create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Rent Diagram Design.', slugs: ['diagram-design'], aisle: 'Design' }));
     const r = await post('clerk', { question: 'a skill for making diagrams', visitorId: vid() });
-    expect(r.body).toEqual({ answer: 'Rent Diagram Design.', slugs: ['diagram-design'], aisle: 'Design' });
+    expect(r.body).toEqual({ answer: 'Rent Diagram Design.', slugs: ['diagram-design'], aisle: 'Design', github: [] });
     expect(d.calls('rpc:search_tapes')[0].calls[0][1]).toEqual({ q: 'a skill for making diagrams', n: 30 });
     expect(create.mock.calls[0][0].model).toBe(HAIKU);
     expect(d.calls('ai_usage').some((q: Query) => has(q, 'insert'))).toBe(true);
@@ -103,6 +103,100 @@ describe('POST /clerk: plain questions', () => {
     await post('clerk', { question: 'diagrams', visitorId: vid() });
     const q = d.calls('tapes')[0];
     expect(has(q, 'eq', 'archived', false)).toBe(true);
+  });
+});
+
+describe('POST /clerk: store first, then GitHub', () => {
+  const ASKQ = 'something for rag pipelines';
+  const strong = (n: number) => Array.from({ length: n }, (_, i) => ({ slug: `rag-${i}`, title: `Rag ${i}`, genre: 'Dev Workflow', blurb: 'rag', kind: 'skill', match: true }));
+  const ghItems = () => [searchItem('acme/rag-kit', { stargazers_count: 900 }), searchItem('acme/already', {}), searchItem('zed/vec', { license: null })];
+  const reply = (slugs: string[], answer = 'Try these.') => toolReply('recommend', { on_topic: true, answer, slugs, aisle: 'Dev Workflow' });
+  const sent = () => String(create.mock.calls[0][0].messages[0].content);
+
+  it('makes no GitHub call when the store has 3 text matches', async () => {
+    const d = setup();
+    d.on('rpc:search_tapes', () => ({ data: strong(3), error: null }));
+    const urls = stubSearch(ghItems());
+    create.mockResolvedValue(reply(['rag-0']));
+    const r = await post('clerk', { question: ASKQ, visitorId: vid() });
+    expect(urls).toHaveLength(0);
+    expect(r.body).toEqual({ answer: 'Try these.', slugs: ['rag-0'], aisle: 'Dev Workflow', github: [] });
+    expect(sent()).not.toContain('gh:');
+  });
+
+  it('with weak matches searches GitHub, skips repos already in the store, and validates the picks', async () => {
+    const d = setup();
+    d.on('rpc:search_tapes', () => ({ data: strong(1), error: null }));
+    d.on('tapes', (q: Query) => (has(q, 'in', 'slug') ? { data: [{ slug: 'gh-acme-already' }], error: null } : { data: [], error: null }));
+    const urls = stubSearch(ghItems());
+    create.mockResolvedValue(reply(['rag-0', 'gh:acme/rag-kit', 'gh:acme/already', 'gh:evil/invented']));
+    const r = await post('clerk', { question: ASKQ, visitorId: vid() });
+    expect(urls).toHaveLength(1);
+    expect(new URL(urls[0]).searchParams.get('per_page')).toBe('8');
+    expect(sent()).toContain('gh:acme/rag-kit | github | TypeScript | acme/rag-kit');
+    expect(sent()).toContain('900★, MIT');
+    expect(sent()).toContain('gh:zed/vec');
+    expect(sent()).toContain('no licence');
+    expect(sent()).not.toContain('gh:acme/already'); // in the store: the tape wins
+    expect(r.body.slugs).toEqual(['rag-0']);
+    expect(r.body.github.map((h: any) => h.full_name)).toEqual(['acme/rag-kit']); // invented and in-store picks dropped
+    expect(r.body.github[0]).toMatchObject({ html_url: 'https://github.com/acme/rag-kit', stars: 900, license: 'MIT', language: 'TypeScript' });
+    expect(JSON.stringify(create.mock.calls[0][0].system)).toMatch(/Prefer store tapes/);
+  });
+
+  it('keeps the total at 5, store tapes first', async () => {
+    const d = setup();
+    d.on('rpc:search_tapes', () => ({ data: strong(2), error: null }));
+    stubSearch(ghItems());
+    create.mockResolvedValue(reply(['gh:acme/rag-kit', 'rag-0', 'rag-1', 'gh:zed/vec']));
+    const r = await post('clerk', { question: ASKQ, visitorId: vid() });
+    expect(r.body.slugs).toEqual(['rag-0', 'rag-1']);
+    expect(r.body.github).toHaveLength(2);
+  });
+
+  it('answers store-only when GitHub errors', async () => {
+    setup();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    stubSearch(403);
+    create.mockResolvedValue(reply(['diagram-design']));
+    const r = await post('clerk', { question: ASKQ, visitorId: vid() });
+    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: ['diagram-design'], aisle: 'Dev Workflow', github: [] } });
+    expect(sent()).not.toContain('gh:');
+  });
+
+  it('skips the top-up past 20 searches an hour for one identity, but still answers and records usage', async () => {
+    const d = setup();
+    d.tokens.tok = githubMember('topup-member');
+    const urls = stubSearch(ghItems());
+    create.mockResolvedValue(reply(['diagram-design']));
+    for (let i = 0; i < 20; i++) {
+      await post('clerk', { question: ASKQ, visitorId: vid(), github: undefined }, undefined, { authorization: 'Bearer tok' });
+      expect(String(create.mock.calls[i][0].messages[0].content)).toContain('gh:acme/rag-kit');
+    }
+    const r = await post('clerk', { question: ASKQ, visitorId: vid(), github: undefined }, undefined, { authorization: 'Bearer tok' });
+    expect(r.status).toBe(200);
+    expect(String(create.mock.calls[20][0].messages[0].content)).not.toContain('gh:');
+    expect(urls).toHaveLength(1); // the first ask filled the cache; the 21st never reached it
+    expect(d.calls('ai_usage').filter((q: Query) => has(q, 'insert'))).toHaveLength(21);
+  });
+
+  it('skips the top-up past 40 an hour for one IP', async () => {
+    const d = setup();
+    for (const t of ['a', 'b', 'c']) d.tokens[`ip-${t}`] = githubMember(`ipmember-${t}`);
+    stubSearch(ghItems());
+    create.mockResolvedValue(reply([]));
+    const ask = (i: number) => post('clerk', { question: ASKQ, visitorId: vid(), github: undefined }, '172.31.7.7', { authorization: `Bearer ip-${'abc'[i % 3]}` });
+    for (let i = 0; i < 41; i++) expect((await ask(i)).status).toBe(200);
+    for (let i = 0; i < 40; i++) expect(String(create.mock.calls[i][0].messages[0].content)).toContain('gh:acme/rag-kit');
+    expect(String(create.mock.calls[40][0].messages[0].content)).not.toContain('gh:');
+  });
+
+  it('records usage as before when GitHub results are offered', async () => {
+    const d = setup();
+    stubSearch(ghItems());
+    create.mockResolvedValue(reply(['gh:acme/rag-kit']));
+    await post('clerk', { question: ASKQ, visitorId: vid() });
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'insert'))).toBe(true);
   });
 });
 
@@ -208,7 +302,7 @@ describe('POST /clerk: pasted repos', () => {
       d.on('ai_usage', usageTable(busyRows));
       create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Try these.', slugs: [], aisle: 'counter' }));
       const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() });
-      expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+      expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter', github: [] } });
       expect(create.mock.calls[0][0].model).toBe(HAIKU);
     });
   });
@@ -504,7 +598,7 @@ describe('bare owner/repo never produces an error response', () => {
     const d = setup();
     askOk();
     const r = await post('clerk', { question: 'tcp/ip', visitorId: vid() });
-    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter', github: [] } });
     expect(d.calls('rpc:ai_spend_today')).toHaveLength(1); // the ask path's own check only
     expect(d.calls('ai_usage').filter((q: Query) => has(q, 'select'))).toHaveLength(0);
     expect(create).toHaveBeenCalledOnce();
@@ -519,7 +613,7 @@ describe('bare owner/repo never produces an error response', () => {
     for (let i = 0; i < 5; i++) await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip);
     askOk();
     const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip);
-    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter', github: [] } });
   });
 
   it('an over-budget bare ref gets the free-mode answer, not the budget line', async () => {
@@ -537,7 +631,7 @@ describe('bare owner/repo never produces an error response', () => {
     setup();
     askOk();
     const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() });
-    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter', github: [] } });
   });
 
   it('an unreadable assessments table on a bare ref also falls through', async () => {
@@ -629,7 +723,7 @@ describe('the clerk is for GitHub visitors only', () => {
   it('lets a real username through', async () => {
     setup();
     create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Rent it.', slugs: [], aisle: 'counter' }));
-    expect(await askAs('lpsmurf')).toEqual({ status: 200, body: { answer: 'Rent it.', slugs: [], aisle: 'counter' } });
+    expect(await askAs('lpsmurf')).toEqual({ status: 200, body: { answer: 'Rent it.', slugs: [], aisle: 'counter', github: [] } });
   });
 
   it('fails closed with 503 when GitHub is down and the name is not cached', async () => {
