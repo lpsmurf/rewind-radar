@@ -9,7 +9,7 @@ vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
 import { handle } from '../lib/routes.ts';
 import { CLERK_LINES } from '../lib/clerkGuard.ts';
-import { HAIKU } from '../lib/ai.ts';
+import { costUsd, HAIKU, SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
 
 const CANDS = [
@@ -240,10 +240,19 @@ describe('every Anthropic route is budget-gated and metered', () => {
     const r = await post('profile', { github: 'lpsmurf', visitorId: vid() });
     expect(r.status).toBe(200);
     expect(before).toEqual(['insert', 'other']);
-    expect(usageRoutes(d)).toMatchObject([{ route: 'profile', cost_usd: 0.03 }]);
+    expect(usageRoutes(d)).toMatchObject([{ route: 'profile', cost_usd: 0.06 }]);
     const upd = d.calls('ai_usage').filter((q: Query) => has(q, 'update'));
     expect(upd).toHaveLength(1);
     expect(arg(upd[0], 'update')).toMatchObject({ input_tokens: 1000, output_tokens: 200 });
+  });
+
+  it('/profile reserves at least its worst case: ~25k input tokens (400 catalog lines + 6000-char profile) and max_tokens 900', async () => {
+    stubGitHub(PROFILE);
+    const d = setup();
+    create.mockResolvedValue(toolReply('profile_radar', { answer: 'ok', picks: [], aisle: 'counter' }));
+    await post('profile', { github: 'lpsmurf', visitorId: vid() });
+    const worst = costUsd(SONNET, { input_tokens: 25_000, output_tokens: 900, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+    expect(usageRoutes(d)[0].cost_usd).toBeGreaterThanOrEqual(worst);
   });
 
   it('/profile deletes its reservation when the call fails without usage', async () => {

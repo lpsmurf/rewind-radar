@@ -9,7 +9,7 @@ vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
 import { budgetLeft, BudgetError, BusyError, getAssessment, personalFit, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
 import { clearRepoExistsCache, parseRepoRef, repoExists } from '../lib/github.ts';
-import { AssessError, SONNET } from '../lib/ai.ts';
+import { AssessError, costUsd, SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
 
 const ref = parseRepoRef('https://github.com/gitroomhq/postiz-app')!;
@@ -445,9 +445,36 @@ describe('reserve before calling Sonnet', () => {
     });
     await getAssessment(ref, allow);
     expect(seen).toEqual(['insert', 'select']); // reserved, then the limit query, then the call
-    expect(arg(placeholder, 'insert')).toMatchObject({ route: 'assess', repo: 'gitroomhq/postiz-app', cost_usd: 0.05 });
+    expect(arg(placeholder, 'insert')).toMatchObject({ route: 'assess', repo: 'gitroomhq/postiz-app', cost_usd: 0.12 });
     expect(placeholder.calls.some((c: any) => c[0] === 'select' && c[1] === 'id')).toBe(true);
     expect(placeholder.calls.some((c: any) => c[0] === 'single')).toBe(true);
+  });
+
+  it('defaults the estimate to at least the worst case: ~12k input tokens and max_tokens 8000 at Sonnet prices', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    await getAssessment(ref, allow);
+    const worst = costUsd(SONNET, { input_tokens: 12_000, output_tokens: 8000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }); // 0.024 + 0.08
+    expect(arg(d.calls('ai_usage').find((q: Query) => has(q, 'insert'))!, 'insert').cost_usd).toBeGreaterThanOrEqual(worst);
+  });
+
+  it('warns when the real cost exceeds the reservation', async () => {
+    stubGitHub(POSTIZ);
+    vi.stubEnv('AI_ASSESS_RESERVE_USD', '0.001');
+    setup(null);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await getAssessment(ref, allow);
+    expect(warn.mock.calls.some((c) => /exceeded the reservation/.test(String(c[0])))).toBe(true);
+    warn.mockRestore();
+  });
+
+  it('does not warn when the real cost is within the reservation', async () => {
+    stubGitHub(POSTIZ);
+    setup(null);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await getAssessment(ref, allow);
+    expect(warn.mock.calls.some((c) => /exceeded the reservation/.test(String(c[0])))).toBe(false);
+    warn.mockRestore();
   });
 
   it('uses AI_ASSESS_RESERVE_USD for the estimate', async () => {
@@ -469,7 +496,7 @@ describe('reserve before calling Sonnet', () => {
 
   it('deletes the reservation when the reserve itself would pass the assess budget', async () => {
     vi.stubEnv('AI_ASSESS_BUDGET_USD', '0.5');
-    const d = setup(null, 0, [{ ...at(5), cost_usd: 0.48 }]); // 0.48 + the 0.05 estimate > 0.5
+    const d = setup(null, 0, [{ ...at(5), cost_usd: 0.48 }]); // 0.48 + the 0.12 estimate > 0.5
     await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BudgetError);
     expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
     expect(create).not.toHaveBeenCalled();
@@ -491,7 +518,7 @@ describe('reserve before calling Sonnet', () => {
     expect(has(upd, 'eq', 'id', 900)).toBe(true);
     expect(arg(upd, 'update')).toMatchObject({ model: SONNET, input_tokens: 3000, output_tokens: 900, cache_read_tokens: 0, cache_write_tokens: 0 });
     expect(arg(upd, 'update').cost_usd).toBeGreaterThan(0);
-    expect(arg(upd, 'update').cost_usd).not.toBe(0.05);
+    expect(arg(upd, 'update').cost_usd).not.toBe(0.12);
   });
 
   it('deletes the reservation when the call fails without usage (nothing was billed)', async () => {
