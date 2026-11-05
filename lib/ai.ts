@@ -80,6 +80,50 @@ export async function tool<T>(o: {
   throw new Error('Claude returned no structured result');
 }
 
+export interface WebSearchResult {
+  url: string;
+  title: string;
+}
+
+/**
+ * One Sonnet turn with the web_search server tool. A turn Anthropic pauses (`pause_turn`) is re-sent with the assistant
+ * content appended, at most `MAX_CONTINUATIONS` times. Returns the answer text and every search result seen; a search
+ * that failed arrives as an error object instead of a result list, and is skipped. Every call's usage goes to `onUsage`.
+ */
+const MAX_CONTINUATIONS = 2;
+export async function webSearch(o: {
+  system: string;
+  user: string;
+  maxUses: number;
+  effort?: 'low' | 'medium' | 'high';
+  maxTokens?: number;
+  onUsage?: OnUsage;
+}): Promise<{ text: string; results: WebSearchResult[] }> {
+  const messages: Anthropic.MessageParam[] = [{ role: 'user', content: o.user }];
+  const results: WebSearchResult[] = [];
+  const texts: string[] = [];
+  for (let turn = 0; ; turn++) {
+    const r = await ai().messages.create({
+      model: SONNET,
+      max_tokens: o.maxTokens ?? 4000,
+      system: o.system,
+      messages: [...messages],
+      tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: o.maxUses }],
+      output_config: { effort: o.effort ?? 'low' },
+    });
+    o.onUsage?.(SONNET, r.usage);
+    for (const b of r.content) {
+      if (b.type === 'text') texts.push(b.text);
+      else if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) {
+        for (const x of b.content) if (x.type === 'web_search_result') results.push({ url: x.url, title: x.title });
+      }
+    }
+    if (r.stop_reason !== 'pause_turn' || turn >= MAX_CONTINUATIONS) break;
+    messages.push({ role: 'assistant', content: r.content as Anthropic.ContentBlockParam[] });
+  }
+  return { text: texts.join('\n').trim(), results };
+}
+
 const genreProp = { type: 'string', enum: [...GENRES] };
 const ringProp = { type: 'string', enum: ['adopt', 'trial', 'assess', 'hold'] };
 const trustProp = { type: 'string', enum: ['clean', 'caution', 'flagged'] };
