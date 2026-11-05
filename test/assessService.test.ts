@@ -7,7 +7,7 @@ const { create, db } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null 
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
-import { BudgetError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
+import { budgetLeft, BudgetError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
 import { parseRepoRef } from '../lib/github.ts';
 import { SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
@@ -169,5 +169,41 @@ describe('database-backed assess limits', () => {
     const d = setup(row(), 0, 'error');
     expect(await getAssessment(ref, allow)).toMatchObject({ cached: true });
     expect(d.calls('ai_usage')).toHaveLength(0);
+  });
+});
+
+describe('fail-closed on the Sonnet paths', () => {
+  const meterDown = (how: 'error' | 'throw') =>
+    db.current.on('rpc:ai_spend_today', () => {
+      if (how === 'throw') throw new Error('network');
+      return { data: null, error: { message: 'no such function' } };
+    });
+
+  it('budgetLeft fails open by default and closed with failClosed', async () => {
+    for (const how of ['error', 'throw'] as const) {
+      setup(null);
+      meterDown(how);
+      expect(await budgetLeft()).toBe(true);
+      expect(await budgetLeft({ failClosed: true })).toBe(false);
+    }
+  });
+
+  it('a miss with a broken spend meter is over budget: no GitHub, no Sonnet', async () => {
+    stubGitHub(POSTIZ);
+    setup(null);
+    meterDown('error');
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BudgetError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('an error reading the assessments table throws instead of counting as a miss', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    d.on('assessments', () => ({ data: null, error: { message: 'relation does not exist' } }));
+    const err = await getAssessment(ref, allow).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(RateLimitError);
+    expect(err).not.toBeInstanceOf(BudgetError);
+    expect(create).not.toHaveBeenCalled();
   });
 });

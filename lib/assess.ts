@@ -176,7 +176,8 @@ const fromRow = (row: Row, stale = false): AssessmentResult => ({
  */
 export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean }): Promise<AssessmentResult | null> {
   const key = ref.full.toLowerCase();
-  const { data } = await admin().from('assessments').select('data,facts,prompt_version,updated_at,hits').eq('repo', key).maybeSingle();
+  const { data, error } = await admin().from('assessments').select('data,facts,prompt_version,updated_at,hits').eq('repo', key).maybeSingle();
+  if (error) throw new Error(`assessments read failed: ${error.message}`); // never treat a broken cache as a miss
   const row = (data ?? null) as Row | null;
 
   if (row && row.prompt_version === PROMPT_VERSION && Date.now() - Date.parse(row.updated_at) < ASSESS_TTL_DAYS * 864e5) {
@@ -185,7 +186,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
   }
 
   if (!o.allowMiss()) throw new RateLimitError();
-  if (!(await budgetLeft())) {
+  if (!(await budgetLeft({ failClosed: true }))) {
     if (row) return fromRow(row, true);
     throw new BudgetError();
   }

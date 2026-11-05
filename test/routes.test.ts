@@ -145,6 +145,15 @@ describe('POST /clerk: pasted repos', () => {
     expect(d.calls('rpc:search_tapes')).toHaveLength(1);
   });
 
+  it('answers 500 "on break" when the assessments table cannot be read', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup();
+    d.on('assessments', () => ({ data: null, error: { message: 'relation does not exist' } }));
+    const r = await post('clerk', { question: 'https://github.com/gitroomhq/postiz-app', visitorId: vid() });
+    expect(r).toEqual({ status: 500, body: { error: 'The clerk is on break.' } });
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('503s when GitHub rate-limits us and nothing is cached', async () => {
     stubGitHub({ '/repos/gitroomhq/postiz-app': 403 });
     setup();
