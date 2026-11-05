@@ -407,6 +407,7 @@ export async function handle(req: Request): Promise<Response> {
 
   // --- admin: delete a chat message for good (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
   if (path === 'chat/delete' && req.method === 'POST') {
+    if (limited('delete-ip:' + who, 20)) return json({ error: CHAT_LINES.limit }, 429); // counts wrong tokens too
     const secret = env('ADMIN_TOKEN');
     if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
     const mid = Number(body.id);

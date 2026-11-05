@@ -1032,6 +1032,15 @@ describe('visitor chat', () => {
       expect(deletesOf(d)).toHaveLength(0);
     });
 
+    it('allows 20 attempts per hour per IP, wrong tokens included (so guessing is slow)', async () => {
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      chatSetup();
+      const at = (ip: string, token: string) => post('chat/delete', { id: 5 }, ip, { 'x-admin-token': token });
+      for (let i = 0; i < 20; i++) expect((await at('10.7.0.1', 'wrong')).status).toBe(403);
+      expect((await at('10.7.0.1', 'sesame-open')).status).toBe(429);
+      expect((await at('10.7.0.2', 'sesame-open')).status).toBe(200);
+    });
+
     it('400s a bad id', async () => {
       vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
       chatSetup();
