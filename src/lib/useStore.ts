@@ -14,7 +14,7 @@ import { deletedId, mergeChat, removeChat, type ChatEntry, type ChatMsg } from '
 
 const CHAT_COLS = 'id,at,sender_key,login,tier,body';
 const COLS =
-  'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
+  'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at,week';
 
 /** A skill written by someone else: we link to its source rather than serve its text. */
 export function isLinkedSkill(t: Tape): boolean {

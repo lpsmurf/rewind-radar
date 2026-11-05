@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { Tape, Visitor, Aisle } from '../types';
-import { GENRES, aisleOf, RING_COLORS, PALETTE as P } from '../types';
+import { GENRES, aisleOf, latestWeek, RING_COLORS, PALETTE as P } from '../types';
 import {
   ARCADE_CABINETS, ARCADE_EXIT, ARCADE_SPAWN, BH, BW, CABINET_TOP, DOOR, H, STORE_SPAWN_FROM_ARCADE, W,
   bx, by, clampToFloor, findPath, inRect, keyVector, lerpRemote, stepBy, stepToward,
@@ -251,7 +251,8 @@ export default function Store(props: StoreProps) {
       } else {
         // bucket tapes
         const by_: Record<string, Tape[]> = {};
-        for (const t of p.tapes) (by_[aisleOf(t)] ||= []).push(t);
+        const newWeek = latestWeek(p.tapes); // older repo tapes drop off the New Releases shelf into their genre aisle
+        for (const t of p.tapes) (by_[aisleOf(t, newWeek)] ||= []).push(t);
 
         // face-out wall boxes
         const faceOut = (list: Tape[], x0: number, perRow: number, aisle: Aisle, pitch = 16) => {
