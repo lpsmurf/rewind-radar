@@ -8,7 +8,7 @@ import type { Assessment, Fit, GateKey, HealthSignals, Ring, RepoSummary } from 
 export { sanitizeUntrusted }; // lives in ai.ts (assess.ts imports ai.ts, not the other way round)
 
 /** Bump when the assessment prompt or schema changes: older cached rows are then re-assessed. */
-export const PROMPT_VERSION = 1;
+export const PROMPT_VERSION = 2;
 export const ASSESS_TTL_DAYS = 7;
 
 export class RateLimitError extends Error {}
