@@ -14,7 +14,7 @@ let ips = 0;
 const call = async (method: string, path: string, o: { body?: unknown; token?: string | null; ip?: string; headers?: Record<string, string> } = {}) => {
   const headers: Record<string, string> = { 'content-type': 'application/json', 'x-forwarded-for': o.ip ?? `10.9.0.${++ips}`, ...o.headers };
   if (o.token !== null) headers['x-admin-token'] = o.token ?? 'open-sesame';
-  const r = await handle(new Request('http://localhost/api/' + path, { method, headers, body: method === 'POST' ? JSON.stringify(o.body ?? {}) : undefined }));
+  const r = await handle(new Request('http://localhost/api/' + path, { method, headers, body: method === 'POST' || method === 'PUT' ? JSON.stringify(o.body ?? {}) : undefined }));
   return { status: r.status, body: (await r.json()) as any };
 };
 
@@ -48,7 +48,7 @@ beforeEach(() => {
 });
 
 describe('admin auth (every /admin route)', () => {
-  const routes: [string, string][] = [['GET', 'admin/queue'], ['POST', 'admin/queue/7/approve'], ['POST', 'admin/queue/7/reject'], ['POST', 'admin/paste'], ['GET', 'admin/spend'], ['GET', 'admin/runs']];
+  const routes: [string, string][] = [['GET', 'admin/config/youtube'], ['PUT', 'admin/config/web'], ['GET', 'admin/queue'], ['POST', 'admin/queue/7/approve'], ['POST', 'admin/queue/7/reject'], ['POST', 'admin/paste'], ['GET', 'admin/spend'], ['GET', 'admin/runs']];
   it.each(routes)('%s %s refuses a wrong or missing token, and touches nothing', async (m, p) => {
     const d = setup();
     expect((await call(m, p, { token: 'nope' })).status).toBe(403);
@@ -234,6 +234,77 @@ describe('GET /admin/spend and /admin/runs', () => {
     const d = setup();
     d.on('source_runs', () => ({ data: null, error: { message: 'down' } }));
     expect((await call('GET', 'admin/runs')).status).toBe(500);
+  });
+});
+
+describe('GET and PUT /admin/config/:key', () => {
+  const CHAN = 'UC' + 'a'.repeat(22);
+  const YT = { queries: ['claude code skills'], channels: [CHAN] };
+  const cfgDb = (...v: unknown[]) => {
+    const value = v.length ? v[0] : YT;
+    const d = setup();
+    d.on('source_config', (q: Query) => (has(q, 'upsert') ? { data: null, error: null } : { data: value === undefined ? null : { value }, error: null }));
+    return d;
+  };
+  const put = (key: string, body: unknown) => call('PUT', `admin/config/${key}`, { body });
+
+  it('reads the stored value for youtube and web', async () => {
+    const d = cfgDb();
+    expect((await call('GET', 'admin/config/youtube')).body).toEqual({ key: 'youtube', value: YT });
+    expect(d.calls('source_config')[0].calls).toContainEqual(['eq', 'key', 'youtube']);
+    expect((await call('GET', 'admin/config/web')).status).toBe(200);
+  });
+  it('gives null for a missing row, 404 for any other key, 500 when the read fails', async () => {
+    cfgDb(undefined);
+    expect((await call('GET', 'admin/config/web')).body).toEqual({ key: 'web', value: null });
+    expect((await call('GET', 'admin/config/github')).status).toBe(404);
+    expect((await call('PUT', 'admin/config/github', { body: {} })).status).toBe(404);
+    const d = cfgDb();
+    d.on('source_config', () => ({ data: null, error: { message: 'down' } }));
+    expect((await call('GET', 'admin/config/youtube')).status).toBe(500);
+  });
+  it('saves a valid youtube config (trimmed) with an upsert on the key', async () => {
+    const d = cfgDb();
+    const r = await put('youtube', { queries: ['  mcp servers  '], channels: [CHAN] });
+    expect(r.body).toEqual({ ok: true, key: 'youtube', value: { queries: ['mcp servers'], channels: [CHAN] } });
+    expect(writes(d, 'source_config', 'upsert')).toEqual([{ key: 'youtube', value: { queries: ['mcp servers'], channels: [CHAN] } }]);
+  });
+  it('rejects bad youtube shapes with 400 and writes nothing', async () => {
+    const d = cfgDb();
+    const bad: unknown[] = [
+      {},
+      { queries: 'a', channels: [] },
+      { queries: ['a', 'b', 'c', 'd', 'e', 'f'], channels: [] },
+      { queries: ['x'.repeat(101)], channels: [] },
+      { queries: [''], channels: [] },
+      { queries: [5], channels: [] },
+      { queries: [], channels: ['UCshort'] },
+      { queries: [], channels: ['XX' + 'a'.repeat(22)] },
+      { queries: [], channels: Array.from({ length: 11 }, (_, i) => 'UC' + String(i).padStart(22, 'a')) },
+      { queries: [], channels: [CHAN + 'x'] },
+      { queries: [], channels: [] },
+    ];
+    for (const b of bad) expect((await put('youtube', b)).status, JSON.stringify(b)).toBe(400);
+    expect(writes(d, 'source_config', 'upsert')).toEqual([]);
+  });
+  it('accepts a channel-only or query-only youtube config', async () => {
+    cfgDb();
+    expect((await put('youtube', { queries: [], channels: [CHAN] })).status).toBe(200);
+    expect((await put('youtube', { queries: ['a'], channels: [] })).status).toBe(200);
+  });
+  it('saves a web query of up to 300 characters and rejects the rest', async () => {
+    const d = cfgDb();
+    expect((await put('web', { query: ' best skills ' })).body.value).toEqual({ query: 'best skills' });
+    expect((await put('web', { query: 'x'.repeat(300) })).status).toBe(200);
+    for (const b of [{}, { query: '' }, { query: '   ' }, { query: 'x'.repeat(301) }, { query: 5 }, { queries: ['a'] }]) {
+      expect((await put('web', b)).status, JSON.stringify(b)).toBe(400);
+    }
+    expect(writes(d, 'source_config', 'upsert')).toHaveLength(2);
+  });
+  it('500s when the write fails', async () => {
+    const d = cfgDb();
+    d.on('source_config', () => ({ data: null, error: { message: 'down' } }));
+    expect((await put('web', { query: 'q' })).status).toBe(500);
   });
 });
 

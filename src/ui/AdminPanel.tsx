@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import { API } from '../lib/api';
-import { adminHeaders, formatUsd, pastedUrls, shortDate, spendTable, type SpendRow } from '../lib/adminPanel';
+import { adminHeaders, formatUsd, isChannelId, linesOf, pastedUrls, shortDate, spendTable, type SpendRow } from '../lib/adminPanel';
 
 const KEY = 'rr-admin-token'; // sessionStorage only: gone when the tab closes
-type Tab = 'queue' | 'paste' | 'spend' | 'runs';
+type Tab = 'queue' | 'paste' | 'spend' | 'runs' | 'config';
 interface QueueItem { id: number; source: string; repo: string; title: string; why: string; credit_url: string; credit_title: string; credit_author: string; at: string; facts?: { stars?: number } | null }
 interface Run { id: number; at: string; source: string; found: number; queued: number; cost_usd: number | string; error: string | null }
 
 class Forbidden extends Error {}
 
-async function api<T>(token: string, path: string, body?: unknown): Promise<T> {
+async function api<T>(token: string, path: string, body?: unknown, method = body === undefined ? 'GET' : 'POST'): Promise<T> {
   const r = await fetch(`${API}/${path}`, {
-    method: body === undefined ? 'GET' : 'POST',
+    method,
     headers: { ...adminHeaders(token), ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -59,7 +59,7 @@ export default function AdminPanel() {
       <header>
         <h1>ADMIN</h1>
         <div className="row">
-          {(['queue', 'paste', 'spend', 'runs'] as Tab[]).map((t) => (
+          {(['queue', 'paste', 'spend', 'runs', 'config'] as Tab[]).map((t) => (
             <button key={t} className={t === tab ? 'btn' : 'btn alt'} onClick={() => { setTab(t); setErr(''); }}>{t.toUpperCase()}</button>
           ))}
           <button className="btn alt" onClick={() => signOut()}>SIGN OUT</button>
@@ -72,6 +72,7 @@ export default function AdminPanel() {
         {tab === 'paste' && <Paste token={token} fail={fail} />}
         {tab === 'spend' && <Spend token={token} fail={fail} />}
         {tab === 'runs' && <Runs token={token} fail={fail} />}
+        {tab === 'config' && <Config token={token} fail={fail} />}
       </main>
     </div>
   );
@@ -205,6 +206,54 @@ function Runs({ token, fail }: TabProps) {
           </tbody>
         </table>
       )}
+    </>
+  );
+}
+
+interface YoutubeConfig { queries?: string[]; channels?: string[] }
+
+function Config({ token, fail }: TabProps) {
+  const [yt, loadYt] = useLoad<{ value: YoutubeConfig | null }>(token, 'admin/config/youtube', fail);
+  const [web, loadWeb] = useLoad<{ value: { query?: string } | null }>(token, 'admin/config/web', fail);
+  const [queries, setQueries] = useState('');
+  const [channels, setChannels] = useState('');
+  const [query, setQuery] = useState('');
+  const [msg, setMsg] = useState('');
+  useEffect(() => {
+    if (yt) {
+      setQueries((yt.value?.queries ?? []).join('\n'));
+      setChannels((yt.value?.channels ?? []).join('\n'));
+    }
+  }, [yt]);
+  useEffect(() => {
+    if (web) setQuery(web.value?.query ?? '');
+  }, [web]);
+  const save = async (key: 'youtube' | 'web', value: unknown, reload: () => void) => {
+    setMsg('');
+    try {
+      await api(token, `admin/config/${key}`, value, 'PUT');
+      setMsg(`Saved ${key}.`);
+      reload();
+    } catch (e) {
+      if (e instanceof Forbidden) fail(e);
+      else setMsg(e instanceof Error ? e.message : 'Failed');
+    }
+  };
+  if (!yt || !web) return <p className="small">Loading...</p>;
+  const qs = linesOf(queries);
+  const chs = linesOf(channels);
+  const badChannels = chs.filter((c) => !isChannelId(c));
+  return (
+    <>
+      <h3>YOUTUBE</h3>
+      <label>QUERIES (one per line, max 5, 100 characters each)<textarea rows={4} value={queries} onChange={(e) => setQueries(e.target.value)} /></label>
+      <label>CHANNEL IDS (one per line, max 10, like UCxxxxxxxxxxxxxxxxxxxxxx)<textarea rows={4} value={channels} onChange={(e) => setChannels(e.target.value)} /></label>
+      {badChannels.length > 0 && <p className="err">Not a channel id: {badChannels.join(', ')}</p>}
+      <button className="btn" disabled={qs.length > 5 || chs.length > 10 || badChannels.length > 0 || qs.length + chs.length === 0 || qs.some((q) => q.length > 100)} onClick={() => save('youtube', { queries: qs, channels: chs }, loadYt)}>SAVE YOUTUBE</button>
+      <h3>WEB SEARCH</h3>
+      <label>WEEKLY QUERY (max 300 characters)<input value={query} maxLength={300} onChange={(e) => setQuery(e.target.value)} /></label>
+      <button className="btn" disabled={!query.trim()} onClick={() => save('web', { query: query.trim() }, loadWeb)}>SAVE WEB</button>
+      {msg && <p className="small">{msg}</p>}
     </>
   );
 }

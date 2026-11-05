@@ -35,3 +35,9 @@ export function spendTable(rows: SpendRow[]): { days: SpendDay[]; total: number 
 export function shortDate(iso: string): string {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso) ? iso.slice(0, 16).replace('T', ' ') : iso;
 }
+
+/** A textarea as a list: one entry per line, trimmed, no blanks or repeats. */
+export const linesOf = (text: string): string[] => [...new Set(text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
+
+/** A YouTube channel id, as the API route requires. */
+export const isChannelId = (s: string) => /^UC[\w-]{22}$/.test(s);

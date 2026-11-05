@@ -7,6 +7,7 @@ import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
 import { refreshRadar } from './radar.ts';
+import { isConfigKey, parseSourceConfig } from './sources/config.ts';
 import { SOURCES } from './sources/index.ts';
 import { liveCtx, manualSource, runSources } from './sources/pipeline.ts';
 import { stockedTape } from './sources/stock.ts';
@@ -16,7 +17,7 @@ import { aisleOf } from '../src/types.ts';
 const CORS: Record<string, string> = {
   'access-control-allow-origin': '*',
   'access-control-allow-headers': 'authorization, x-client-info, apikey, content-type, x-admin-token',
-  'access-control-allow-methods': 'GET, POST, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, PUT, OPTIONS',
 };
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...CORS, 'content-type': 'application/json' } });
@@ -129,7 +130,7 @@ export async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
   const path = new URL(req.url).pathname.replace(/^.*?\/api\/?/, '').replace(/\/$/, '');
   const who = clientKey(req);
-  const body = req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
+  const body = req.method === 'POST' || req.method === 'PUT' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
 
   // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
@@ -510,6 +511,21 @@ export async function handle(req: Request): Promise<Response> {
       const days = Number.isFinite(n) && n >= 1 ? Math.min(90, Math.floor(n)) : 14;
       const { data, error } = await db.rpc('spend_by_day', { days });
       return error ? json({ error: 'Could not read spend' }, 500) : json({ days, rows: data ?? [] });
+    }
+
+    // the editable parts of source_config: GET reads, PUT replaces (the body is the value)
+    const cfg = /^admin\/config\/([^/]+)$/.exec(path);
+    if (cfg && (req.method === 'GET' || req.method === 'PUT')) {
+      const key = cfg[1];
+      if (!isConfigKey(key)) return json({ error: 'Not found' }, 404);
+      if (req.method === 'GET') {
+        const { data, error } = await db.from('source_config').select('value').eq('key', key).maybeSingle();
+        return error ? json({ error: 'Could not read the config' }, 500) : json({ key, value: data?.value ?? null });
+      }
+      const parsed = parseSourceConfig(key, body);
+      if ('error' in parsed) return json({ error: parsed.error }, 400);
+      const { error } = await db.from('source_config').upsert({ key, value: parsed.value }, { onConflict: 'key' });
+      return error ? json({ error: 'Could not save the config' }, 500) : json({ ok: true, key, value: parsed.value });
     }
 
     if (path === 'admin/runs' && req.method === 'GET') {

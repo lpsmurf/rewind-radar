@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adminHeaders, formatUsd, isAdminHash, pastedUrls, spendTable, shortDate } from '../src/lib/adminPanel.ts';
+import { adminHeaders, formatUsd, isAdminHash, isChannelId, linesOf, pastedUrls, spendTable, shortDate } from '../src/lib/adminPanel.ts';
 
 describe('isAdminHash', () => {
   it('matches #admin only', () => {
@@ -55,5 +55,22 @@ describe('adminHeaders and shortDate', () => {
     expect(shortDate('2026-11-04T09:03:55Z')).toBe('2026-11-04 09:03');
     expect(shortDate('')).toBe('');
     expect(shortDate('nope')).toBe('nope');
+  });
+});
+
+describe('linesOf', () => {
+  it('splits a textarea into trimmed lines without blanks or repeats', () => {
+    expect(linesOf(' a b \n\nc\r\na b\n')).toEqual(['a b', 'c']);
+    expect(linesOf('')).toEqual([]);
+  });
+});
+
+describe('isChannelId', () => {
+  it('accepts UC plus 22 id characters only', () => {
+    expect(isChannelId('UC' + 'a'.repeat(22))).toBe(true);
+    expect(isChannelId('UC_-' + 'a'.repeat(20))).toBe(true);
+    expect(isChannelId('UC' + 'a'.repeat(21))).toBe(false);
+    expect(isChannelId('XX' + 'a'.repeat(22))).toBe(false);
+    expect(isChannelId('UC' + 'a'.repeat(22) + '\n')).toBe(false);
   });
 });
