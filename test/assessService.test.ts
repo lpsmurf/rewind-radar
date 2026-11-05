@@ -369,12 +369,12 @@ describe('check order: refused requests do not use the per-IP slot', () => {
     expect(allowMiss).not.toHaveBeenCalled();
   });
 
-  it('does not call allowMiss when the database caps refuse', async () => {
+  it('does not consume the per-IP slot when the database caps refuse (only the non-consuming peek runs)', async () => {
     vi.stubEnv('AI_ASSESS_MAX_PER_HOUR', '1');
-    const allowMiss = vi.fn(() => true);
+    const allowMiss = vi.fn((_dry?: boolean) => true);
     setup(null, 0, [{ at: new Date().toISOString(), cost_usd: 0.01 }]);
     await expect(getAssessment(ref, { allowMiss })).rejects.toBeInstanceOf(RateLimitError);
-    expect(allowMiss).not.toHaveBeenCalled();
+    expect(allowMiss.mock.calls.filter(([dry]) => !dry)).toHaveLength(0);
   });
 });
 
@@ -509,10 +509,29 @@ describe('reserve before calling Sonnet', () => {
     expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
   });
 
-  it('deletes the reservation when the per-IP limit says no, and serves the stale row', async () => {
+  it('deletes the reservation when the per-IP slot is lost between peek and take, and serves the stale row', async () => {
+    const d = setup(row({ updated_at: daysAgo(8) }));
+    // peek says yes, the consuming call says no: another request of the same visitor took the last slot
+    expect(await getAssessment(ref, { allowMiss: (dry?: boolean) => !!dry })).toMatchObject({ stale: true });
+    expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
+  });
+
+  it('makes no reservation at all for a visitor already over the per-IP limit (stale row or RateLimitError)', async () => {
     const d = setup(row({ updated_at: daysAgo(8) }));
     expect(await getAssessment(ref, { allowMiss: () => false })).toMatchObject({ stale: true });
-    expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
+    expect(d.calls('ai_usage')).toHaveLength(0);
+    const d2 = setup(null);
+    await expect(getAssessment(ref, { allowMiss: () => false })).rejects.toBeInstanceOf(RateLimitError);
+    expect(d2.calls('ai_usage')).toHaveLength(0);
+  });
+
+  it('peeks before the reservation and consumes the slot only after it succeeded', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    const order: string[] = [];
+    const allowMiss = vi.fn((dry?: boolean) => (order.push((dry ? 'peek' : 'take') + ':' + kinds(d).join('+')), true));
+    await getAssessment(ref, { allowMiss });
+    expect(order).toEqual(['peek:', 'take:insert+select']);
   });
 
   it('fails closed when the reservation insert errors', async () => {

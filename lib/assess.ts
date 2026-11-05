@@ -257,12 +257,12 @@ const fromRow = (row: Row, stale = false): AssessmentResult => ({
 
 /**
  * Cached for ASSESS_TTL_DAYS. A miss costs one GitHub read and one Sonnet call, so it must pass `allowMiss`
- * (per-IP limit), the database hourly/assess-budget caps and the daily budget; if any of them says no, or the
+ * (per-IP limit; called with true it only peeks, without true it consumes a slot), the database hourly/assess-budget caps and the daily budget; if any of them says no, or the
  * refresh breaks, an old row is served as stale (RateLimitError/BudgetError only when there is no row). A repo
  * assessed in the last 10 minutes (it failed, or another request is on it) is not assessed again: stale row or BusyError.
  * null = GitHub has no such repo. A bare owner/repo is verified to exist first.
  */
-export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean }): Promise<AssessmentResult | null> {
+export async function getAssessment(ref: RepoRef, o: { allowMiss: (dryRun?: boolean) => boolean }): Promise<AssessmentResult | null> {
   const key = ref.full.toLowerCase();
   const { data, error } = await admin().from('assessments').select('data,facts,prompt_version,updated_at,hits').eq('repo', key).maybeSingle();
   if (error) throw new Error(`assessments read failed: ${error.message}`); // never treat a broken cache as a miss
@@ -289,6 +289,11 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     if (row) return fromRow(row, true);
     throw new BudgetError();
   }
+  // Peek at the per-IP limit before reserving: a visitor already over it must not trip the shared caps with short-lived reservations.
+  if (!o.allowMiss(true)) {
+    if (row) return fromRow(row, true);
+    throw new RateLimitError();
+  }
   let slot: Reservation;
   try {
     slot = await reserveAssess(key);
@@ -296,7 +301,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     if (row) return fromRow(row, true);
     throw e;
   }
-  if (!o.allowMiss()) {
+  if (!o.allowMiss()) { // consume the slot now; losing a race with the same visitor's parallel request releases the reservation
     await slot.release();
     if (row) return fromRow(row, true);
     throw new RateLimitError();

@@ -28,13 +28,13 @@ function prune(now: number) {
     hits.delete(k);
   }
 }
-function limited(id: string, max: number): boolean {
+function limited(id: string, max: number, peek = false): boolean {
   const key = id.slice(0, 100);
   const now = Date.now();
   const arr = (hits.get(key) ?? []).filter((t) => now - t < HOUR);
   hits.delete(key); // re-insert so the newest keys sit last
   const over = arr.length >= max;
-  if (!over) arr.push(now);
+  if (!over && !peek) arr.push(now);
   hits.set(key, arr);
   if (hits.size > MAX_KEYS) prune(now);
   return over;
@@ -86,7 +86,7 @@ export async function handle(req: Request): Promise<Response> {
 
     if (q.kind === 'repo') {
       try {
-        const got = await getAssessment(q.ref, { allowMiss: () => !limited('assess:' + who, 5) });
+        const got = await getAssessment(q.ref, { allowMiss: (dry) => !limited('assess:' + who, 5, dry) });
         if (got) {
           const { owner, repo } = q.ref;
           const { data: tape } = await admin()
