@@ -28,6 +28,7 @@ import { handle } from '../lib/routes.ts';
 import { CLERK_LINES } from '../lib/clerkGuard.ts';
 import { CHAT_LINES } from '../lib/chatGuard.ts';
 import { costUsd, HAIKU, PROFILE_SCHEMA, SONNET } from '../lib/ai.ts';
+import { PROFILE_RESERVE_USD, profileWorstCaseUsd } from '../lib/assess.ts';
 import { githubMember, SAMPLE } from './helpers/samples.ts';
 
 /** A /profile reply: Sonnet structured output is JSON text, closed schema. */
@@ -368,18 +369,20 @@ describe('every Anthropic route is budget-gated and metered', () => {
     const r = await post('profile', { github: 'lpsmurf', visitorId: vid() });
     expect(r.status).toBe(200);
     expect(before).toEqual(['insert', 'other']);
-    expect(usageRoutes(d)).toMatchObject([{ route: 'profile', cost_usd: 0.07 }]);
+    expect(usageRoutes(d)).toMatchObject([{ route: 'profile', cost_usd: PROFILE_RESERVE_USD }]);
     const upd = d.calls('ai_usage').filter((q: Query) => has(q, 'update'));
     expect(upd).toHaveLength(1);
     expect(arg(upd[0], 'update')).toMatchObject({ input_tokens: 1000, output_tokens: 200 });
   });
 
-  it('/profile reserves at least its worst case: ~25k input tokens (370 store lines, 20 GitHub lines, 6000-char profile) and max_tokens 1500', async () => {
+  it('/profile reserves at least the worst case of its real prompt caps (profile 6k + store 40k + skills 40k + hits, 3 chars/token) and max_tokens 1500', async () => {
     stubGitHub(PROFILE);
     const d = setup();
     create.mockResolvedValue(profileReply({ answer: 'ok' }));
     await post('profile', { github: 'lpsmurf', visitorId: vid() });
-    const worst = costUsd(SONNET, { input_tokens: 25_000, output_tokens: 1500, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+    const worst = profileWorstCaseUsd();
+    expect(worst).toBeGreaterThan(0.07); // the old reserve was too low for the caps
+    expect(PROFILE_RESERVE_USD).toBeGreaterThanOrEqual(worst);
     expect(usageRoutes(d)[0].cost_usd).toBeGreaterThanOrEqual(worst);
   });
 
@@ -602,6 +605,35 @@ describe('POST /profile: repos first, then skills; store first, GitHub tops up',
     expect(r.body.picks).toEqual([]);
     expect(r.body.skills).toEqual([]);
     expect(r.body.slugs).toEqual([]);
+  });
+
+  it('leaves out store tapes made from the visitor\'s own repos, and drops them again if the model picks one', async () => {
+    const d = setup();
+    const own = [
+      { slug: 'gh-lpsmurf-rewind-radar', title: 'lpsmurf/rewind-radar', genre: 'Dev Workflow', blurb: 'mine', kind: 'repo' },
+      { slug: 'c-lpsmurf-ax-route', title: 'lpsmurf/ax-route', genre: 'Dev Workflow', blurb: 'mine too', kind: 'community' },
+    ];
+    d.on('tapes', (q: Query) =>
+      has(q, 'in', 'slug') ? { data: [], error: null }
+      : has(q, 'in', 'kind') ? { data: [...CANDS.filter((c) => c.kind !== 'skill'), ...own], error: null }
+      : { data: CANDS.filter((c) => c.kind === 'skill'), error: null });
+    stubGitHubAndSearch({ ...LPSMURF }, []);
+    create.mockResolvedValue(profileReply({ repos: [{ id: 'gh-lpsmurf-rewind-radar', why: 'own' }, { id: 'gh-acme-new', why: 'ok' }] }));
+    const r = await scan();
+    expect(sent()).toContain('gh-acme-new');
+    expect(sent()).not.toContain('gh-lpsmurf-rewind-radar');
+    expect(sent()).not.toContain('c-lpsmurf-ax-route');
+    expect(r.body.picks.map((p: any) => p.slug)).toEqual(['gh-acme-new']);
+  });
+
+  it('asks for skills in a fixed order (most rented first, then newest) so the 120 cap is meaningful', async () => {
+    const { d } = ready();
+    create.mockResolvedValue(profileReply());
+    await scan();
+    const skillQ = d.calls('tapes').find((q: Query) => has(q, 'eq', 'kind', 'skill'))!;
+    const orders = skillQ.calls.filter((c: any[]) => c[0] === 'order');
+    expect(orders.map((c: any[]) => c[1])).toEqual(['rentals', 'created_at']);
+    expect(orders.map((c: any[]) => c[2].ascending)).toEqual([false, false]);
   });
 
   it('leaves out the visitor\'s own repos and repos already in the store before the model sees them', async () => {
