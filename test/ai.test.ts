@@ -72,6 +72,18 @@ describe('assessRepoAI (Sonnet, structured output)', () => {
     await expect(assessRepoAI(f, healthSignals(f), '', cands)).rejects.toBeInstanceOf(AssessError);
   });
 
+  it.each([
+    ['a refusal', textReply('', 'refusal')],
+    ['a cut-off answer', textReply('{"title":', 'max_tokens')],
+    ['invalid JSON', textReply('not json')],
+  ])('puts the usage and model on the AssessError for %s', async (_, reply) => {
+    create.mockResolvedValue(reply);
+    const e = await assessRepoAI(f, healthSignals(f), '', cands).catch((x) => x);
+    expect(e).toBeInstanceOf(AssessError);
+    expect(e.usage).toMatchObject({ input_tokens: 1000, output_tokens: 200 });
+    expect(e.model).toBe(SONNET);
+  });
+
   it('honours ASSESS_MODEL', async () => {
     vi.stubEnv('ASSESS_MODEL', HAIKU);
     create.mockResolvedValue(jsonReply(SAMPLE));

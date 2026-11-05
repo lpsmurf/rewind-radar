@@ -1,5 +1,5 @@
 import { admin } from './admin.ts';
-import { assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, type OnUsage } from './ai.ts';
+import { AssessError, assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, type OnUsage } from './ai.ts';
 import { candidates } from './catalog.ts';
 import { env } from './env.ts';
 import { fetchProfile, fetchRepoFacts, repoExists, type RepoFacts, type RepoRef } from './github.ts';
@@ -252,6 +252,8 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     if (error) console.warn('[assess] could not cache', error.message); // the visitor still gets the answer we paid for
     return { assessment, repo, reviewed_at, cached: false };
   } catch (e) {
+    // A refusal, cut-off or unreadable answer still cost tokens: count them toward both budgets.
+    if (e instanceof AssessError && e.usage && e.model) await recordUsage('assess', e.model, e.usage, key);
     if (row) {
       console.warn('[assess] refresh failed, serving stale', e);
       return fromRow(row, true);

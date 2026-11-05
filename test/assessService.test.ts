@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, type Query } from './helpers/fakeDb.ts';
-import { jsonReply } from './helpers/anthropic.ts';
+import { jsonReply, textReply } from './helpers/anthropic.ts';
 import { POSTIZ, stubGitHub } from './helpers/github.ts';
 
 const { create, db } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any } }));
@@ -9,7 +9,7 @@ vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
 import { budgetLeft, BudgetError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
 import { parseRepoRef, repoExists } from '../lib/github.ts';
-import { SONNET } from '../lib/ai.ts';
+import { AssessError, SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
 
 const ref = parseRepoRef('https://github.com/gitroomhq/postiz-app')!;
@@ -91,6 +91,29 @@ describe('getAssessment', () => {
     stubGitHub({ '/repos/gitroomhq/postiz-app': 403 });
     setup(row({ updated_at: daysAgo(8) }));
     expect(await getAssessment(ref, allow)).toMatchObject({ cached: true, stale: true });
+  });
+
+  it.each([
+    ['a refusal', textReply('', 'refusal')],
+    ['a cut-off answer', textReply('{"title":', 'max_tokens')],
+    ['invalid JSON', textReply('not json')],
+  ])('meters the tokens of a failed call (%s)', async (_, reply) => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    create.mockResolvedValue(reply);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(AssessError);
+    const ins = d.calls('ai_usage').filter((q: Query) => has(q, 'insert'));
+    expect(ins).toHaveLength(1);
+    expect(arg(ins[0], 'insert')).toMatchObject({ route: 'assess', model: SONNET, repo: 'gitroomhq/postiz-app', input_tokens: 1000, output_tokens: 200 });
+    expect(arg(ins[0], 'insert').cost_usd).toBeGreaterThan(0);
+  });
+
+  it('meters a failed refresh and still serves the stale row', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(row({ updated_at: daysAgo(8) }));
+    create.mockResolvedValue(textReply('', 'refusal'));
+    expect(await getAssessment(ref, allow)).toMatchObject({ cached: true, stale: true });
+    expect(d.calls('ai_usage').filter((q: Query) => has(q, 'insert'))).toHaveLength(1);
   });
 
   it('returns null for a repo GitHub does not have', async () => {

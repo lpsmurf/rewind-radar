@@ -289,7 +289,12 @@ pitch: the visitor's pitch tidied into one clear sentence (max 160 chars, keep t
 }
 
 // ---------- repo assessment (Sonnet, structured output; no tools) ----------
-export class AssessError extends Error {}
+/** `usage` and `model` are set when the call itself ran (refusal, cut off, bad JSON): it still cost money. */
+export class AssessError extends Error {
+  constructor(message: string, public usage?: Anthropic.Usage, public model?: string) {
+    super(message);
+  }
+}
 
 /** One structured-output call: the reply is JSON that matches `schema`. Refusals and cut-off answers throw AssessError. */
 export async function structured<T>(o: {
@@ -307,13 +312,13 @@ export async function structured<T>(o: {
     messages: [{ role: 'user', content: o.user }],
     output_config: { format: { type: 'json_schema', schema: o.schema }, effort: o.effort },
   });
-  if (r.stop_reason === 'refusal') throw new AssessError('Claude declined to assess this repo');
-  if (r.stop_reason === 'max_tokens') throw new AssessError('The assessment was cut off');
+  if (r.stop_reason === 'refusal') throw new AssessError('Claude declined to assess this repo', r.usage, o.model);
+  if (r.stop_reason === 'max_tokens') throw new AssessError('The assessment was cut off', r.usage, o.model);
   const text = r.content.flatMap((c) => (c.type === 'text' ? [c.text] : [])).join('');
   try {
     return { value: JSON.parse(text) as T, usage: r.usage };
   } catch {
-    throw new AssessError('Claude returned an unreadable assessment');
+    throw new AssessError('Claude returned an unreadable assessment', r.usage, o.model);
   }
 }
 
