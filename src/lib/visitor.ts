@@ -31,6 +31,33 @@ export function getVisitor(): Visitor {
   };
 }
 
+const KEY_SEP = '~';
+
+/** Presence key: visitor id plus a per-tab suffix, so two tabs of one visitor are two people. Votes keep the plain id. */
+export function presenceKey(visitorId: string, tabId: string): string {
+  return `${visitorId}${KEY_SEP}${tabId}`;
+}
+
+export function visitorIdOfKey(key: string): string {
+  const i = key.indexOf(KEY_SEP);
+  return i < 0 ? key : key.slice(0, i);
+}
+
+/** Per-tab id kept in sessionStorage (survives a reload, not a new tab). */
+export function getTabId(storage?: Pick<Storage, 'getItem' | 'setItem'>): string {
+  try {
+    const s = storage ?? sessionStorage;
+    let t = s.getItem('rr_tab') || '';
+    if (!t) {
+      t = randId().slice(0, 6);
+      s.setItem('rr_tab', t);
+    }
+    return t;
+  } catch {
+    return randId().slice(0, 6);
+  }
+}
+
 /** GitHub username remembered after a profile scan (enables the FIT check). */
 export function getGithub(): string | null {
   try {
