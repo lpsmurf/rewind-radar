@@ -1,5 +1,5 @@
 import { admin } from './admin.ts';
-import { AssessError, assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, type OnUsage } from './ai.ts';
+import { AssessError, assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, SONNET, type OnUsage } from './ai.ts';
 import { candidates } from './catalog.ts';
 import { env } from './env.ts';
 import { fetchProfile, fetchRepoFacts, repoExists, type RepoFacts, type RepoRef } from './github.ts';
@@ -13,6 +13,9 @@ export const ASSESS_TTL_DAYS = 7;
 
 export class RateLimitError extends Error {}
 export class BudgetError extends Error {}
+/** The same repo was assessed (and failed) or is being assessed right now: wait a few minutes. */
+export class BusyError extends Error {}
+const BUSY_MS = 10 * 60_000;
 
 type Usage = Parameters<OnUsage>[1];
 
@@ -104,47 +107,111 @@ export function clampRing(a: Assessment, s: HealthSignals): Assessment {
 }
 
 // ---------- spend meter ----------
-/**
- * False once today's AI spend has reached AI_DAILY_BUDGET_USD. If the meter is unavailable it fails open,
- * or closed with `failClosed` (use that before any Sonnet call).
- */
-export async function budgetLeft(o: { failClosed?: boolean } = {}): Promise<boolean> {
+/** False once today's AI spend has reached AI_DAILY_BUDGET_USD, or if the meter is unavailable (fails closed). */
+export async function budgetLeft(): Promise<boolean> {
   const cap = Number(env('AI_DAILY_BUDGET_USD') || '5');
   try {
     const { data, error } = await admin().rpc('ai_spend_today');
     if (error) throw error;
     return Number(data ?? 0) < cap;
   } catch (e) {
-    console.warn(`[budget] spend meter unavailable, ${o.failClosed ? 'blocking' : 'allowing'}`, e);
-    return !o.failClosed;
+    console.warn('[budget] spend meter unavailable, blocking', e);
+    return false;
   }
+}
+
+/** A placeholder ai_usage row held while a Sonnet call is in flight. Settle it with the real usage, or release it. */
+export interface Reservation {
+  settle(model: string, usage: Usage): Promise<number>;
+  release(): Promise<void>;
 }
 
 /**
  * Database-backed caps on one Sonnet route, shared by every Edge isolate: calls per hour, and spend per UTC day
- * (its own budget, smaller than the clerk's). Throws RateLimitError / BudgetError; fails closed if the query breaks.
+ * (its own budget, smaller than the clerk's). Reserve-then-check: a placeholder row (estimated cost) goes in first,
+ * then the limit query sees it and every concurrent one, so a burst can over-refuse but never overshoot.
+ * With `busyRepo`, another row for that repo in the last 10 minutes (failed, or in flight) throws BusyError.
+ * Throws RateLimitError / BudgetError / BusyError (the placeholder is deleted); fails closed if the insert or the query breaks.
  */
-export async function checkRouteLimits(route: string, o: { maxPerHour: number; budgetUsd: number }): Promise<void> {
-  const now = Date.now();
-  const dayStart = new Date(now);
-  dayStart.setUTCHours(0, 0, 0, 0);
-  let rows: { at: string; cost_usd: number }[];
+export async function reserve(
+  route: string,
+  o: { maxPerHour: number; budgetUsd: number; reserveUsd: number; model: string; repo?: string; busyRepo?: string },
+): Promise<Reservation> {
+  let id: unknown;
   try {
-    const { data, error } = await admin().from('ai_usage').select('at,cost_usd').eq('route', route).gte('at', dayStart.toISOString());
-    if (error) throw error;
-    rows = (data ?? []) as typeof rows;
+    const { data, error } = await admin()
+      .from('ai_usage')
+      .insert({ route, model: o.model, repo: o.repo ?? null, cost_usd: o.reserveUsd })
+      .select('id')
+      .single();
+    if (error || !data) throw error ?? new Error('no reservation id');
+    id = (data as { id: unknown }).id;
   } catch (e) {
-    console.warn(`[${route}] usage query failed, blocking`, e);
+    console.warn(`[${route}] usage reservation failed, blocking`, e);
     throw new BudgetError();
   }
-  if (rows.filter((r) => now - Date.parse(r.at) < 3600_000).length >= o.maxPerHour) throw new RateLimitError();
-  if (rows.reduce((sum, r) => sum + Number(r.cost_usd ?? 0), 0) >= o.budgetUsd) throw new BudgetError();
+  const release = async () => {
+    try {
+      const { error } = await admin().from('ai_usage').delete().eq('id', id);
+      if (error) console.warn('[usage]', error.message);
+    } catch (e) {
+      console.warn('[usage]', e);
+    }
+  };
+  try {
+    const now = Date.now();
+    const dayStart = new Date(now);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    let rows: { id: unknown; at: string; cost_usd: number; repo: string | null }[];
+    try {
+      const { data, error } = await admin().from('ai_usage').select('id,at,cost_usd,repo').eq('route', route).gte('at', dayStart.toISOString());
+      if (error) throw error;
+      rows = (data ?? []) as typeof rows;
+    } catch (e) {
+      console.warn(`[${route}] usage query failed, blocking`, e);
+      throw new BudgetError();
+    }
+    const others = rows.filter((r) => r.id !== id); // our own placeholder is counted by adding it, not by the query
+    if (o.busyRepo && others.some((r) => r.repo === o.busyRepo && now - Date.parse(r.at) < BUSY_MS)) throw new BusyError();
+    if (others.filter((r) => now - Date.parse(r.at) < 3600_000).length >= o.maxPerHour) throw new RateLimitError();
+    if (others.reduce((sum, r) => sum + Number(r.cost_usd ?? 0), 0) + o.reserveUsd > o.budgetUsd) throw new BudgetError();
+  } catch (e) {
+    await release();
+    throw e;
+  }
+  return {
+    release,
+    async settle(model, usage) {
+      const cost = costUsd(model, usage);
+      try {
+        const { error } = await admin()
+          .from('ai_usage')
+          .update({
+            model,
+            input_tokens: usage.input_tokens ?? 0,
+            output_tokens: usage.output_tokens ?? 0,
+            cache_read_tokens: usage.cache_read_input_tokens ?? 0,
+            cache_write_tokens: usage.cache_creation_input_tokens ?? 0,
+            cost_usd: cost,
+          })
+          .eq('id', id);
+        if (error) console.warn('[usage]', error.message); // the placeholder's estimate stays: conservative
+      } catch (e) {
+        console.warn('[usage]', e);
+      }
+      return cost;
+    },
+  };
 }
 
-const checkAssessLimits = () =>
-  checkRouteLimits('assess', {
+const reserveAssess = (key: string) =>
+  reserve('assess', {
     maxPerHour: Number(env('AI_ASSESS_MAX_PER_HOUR') || '20'),
     budgetUsd: Number(env('AI_ASSESS_BUDGET_USD') || '2'),
+    reserveUsd: Number(env('AI_ASSESS_RESERVE_USD') || '0.05'),
+    model: env('ASSESS_MODEL') || SONNET,
+    repo: key,
+    busyRepo: key,
   });
 
 /** Log one Anthropic call to ai_usage and return its cost. Never throws. */
@@ -191,7 +258,8 @@ const fromRow = (row: Row, stale = false): AssessmentResult => ({
 /**
  * Cached for ASSESS_TTL_DAYS. A miss costs one GitHub read and one Sonnet call, so it must pass `allowMiss`
  * (per-IP limit), the database hourly/assess-budget caps and the daily budget; if any of them says no, or the
- * refresh breaks, an old row is served as stale (RateLimitError/BudgetError only when there is no row).
+ * refresh breaks, an old row is served as stale (RateLimitError/BudgetError only when there is no row). A repo
+ * assessed in the last 10 minutes (it failed, or another request is on it) is not assessed again: stale row or BusyError.
  * null = GitHub has no such repo. A bare owner/repo is verified to exist first.
  */
 export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean }): Promise<AssessmentResult | null> {
@@ -217,28 +285,35 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
   }
 
   // Budget and database caps first, so a refused request does not burn the visitor's per-IP slot.
-  if (!(await budgetLeft({ failClosed: true }))) {
+  if (!(await budgetLeft())) {
     if (row) return fromRow(row, true);
     throw new BudgetError();
   }
+  let slot: Reservation;
   try {
-    await checkAssessLimits();
+    slot = await reserveAssess(key);
   } catch (e) {
     if (row) return fromRow(row, true);
     throw e;
   }
   if (!o.allowMiss()) {
+    await slot.release();
     if (row) return fromRow(row, true);
     throw new RateLimitError();
   }
 
+  let settled = false;
   try {
     const facts = await fetchRepoFacts(ref);
-    if (!facts) return null;
+    if (!facts) {
+      await slot.release();
+      return null;
+    }
     const signals = healthSignals(facts);
     const cands = await candidates(`${facts.full_name} ${facts.description ?? ''} ${facts.topics.join(' ')}`, 20);
     const { raw, usage, model } = await assessRepoAI(facts, signals, facts.readme, cands);
-    const cost = await recordUsage('assess', model, usage, key); // meter before anything else can throw
+    const cost = await slot.settle(model, usage); // meter before anything else can throw
+    settled = true;
     const assessment = clampRing(normalizeAssessment(raw, cands.map((c) => c.slug)), signals);
     const repo: RepoSummary = {
       full_name: facts.full_name,
@@ -273,7 +348,10 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     return { assessment, repo, reviewed_at, cached: false };
   } catch (e) {
     // A refusal, cut-off or unreadable answer still cost tokens: count them toward both budgets.
-    if (e instanceof AssessError && e.usage && e.model) await recordUsage('assess', e.model, e.usage, key);
+    if (!settled) {
+      if (e instanceof AssessError && e.usage && e.model) await slot.settle(e.model, e.usage);
+      else await slot.release(); // nothing was billed
+    }
     if (row) {
       console.warn('[assess] refresh failed, serving stale', e);
       return fromRow(row, true);

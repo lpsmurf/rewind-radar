@@ -1,6 +1,6 @@
 import { admin } from './admin.ts';
-import { clerk, recommendForProfile, reviewProposal, reviewSubmission, type OnUsage } from './ai.ts';
-import { BudgetError, budgetLeft, checkRouteLimits, getAssessment, personalFit, RateLimitError, recordUsage } from './assess.ts';
+import { clerk, recommendForProfile, reviewProposal, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
+import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
@@ -59,6 +59,16 @@ async function meter<T>(route: string, run: (onUsage: OnUsage) => Promise<T>): P
   }
 }
 
+/** Add up token counts when one request made several calls. */
+const sumUsage = (us: Parameters<OnUsage>[1][]): Parameters<OnUsage>[1] =>
+  us.reduce((a, u) => ({
+    ...a,
+    input_tokens: (a.input_tokens ?? 0) + (u.input_tokens ?? 0),
+    output_tokens: (a.output_tokens ?? 0) + (u.output_tokens ?? 0),
+    cache_read_input_tokens: (a.cache_read_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0),
+    cache_creation_input_tokens: (a.cache_creation_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
+  }));
+
 const TAPE_COLS = 'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
 
 export async function handle(req: Request): Promise<Response> {
@@ -107,6 +117,7 @@ export async function handle(req: Request): Promise<Response> {
         if (!q.ref.bare) {
           if (e instanceof RateLimitError) return json({ error: CLERK_LINES.rateLimit }, 429);
           if (e instanceof BudgetError) return json({ answer: CLERK_LINES.budget, ...plain });
+          if (e instanceof BusyError) return json({ error: CLERK_LINES.busy }, 503);
           if (e instanceof GitHubError) return json({ error: 'GitHub is rate-limiting the clerk. Try again in a few minutes.' }, 503);
           console.error('[clerk:assess]', e);
           return json({ error: 'The clerk is on break.' }, 500);
@@ -143,17 +154,27 @@ export async function handle(req: Request): Promise<Response> {
       if (!prof) return json({ error: "Couldn't find that GitHub user or repo" }, 404);
       const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').eq('archived', false).limit(400);
       if (error) return json({ error: 'Catalog unavailable' }, 500);
-      if (!(await budgetLeft({ failClosed: true }))) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      let slot;
       try {
-        await checkRouteLimits('profile', {
+        slot = await reserve('profile', {
           maxPerHour: Number(env('AI_PROFILE_MAX_PER_HOUR') || '30'),
           budgetUsd: Number(env('AI_PROFILE_BUDGET_USD') || '1'),
+          reserveUsd: Number(env('AI_PROFILE_RESERVE_USD') || '0.03'),
+          model: SONNET,
         });
       } catch (e) {
         if (e instanceof RateLimitError || e instanceof BudgetError) return json({ error: CLERK_LINES.budgetBusy }, 503);
         throw e;
       }
-      const rec = await meter('profile', (onUsage) => recommendForProfile(prof.text, data ?? [], onUsage));
+      const used: [string, Parameters<OnUsage>[1]][] = [];
+      let rec;
+      try {
+        rec = await recommendForProfile(prof.text, data ?? [], (m, u) => used.push([m, u]));
+      } finally {
+        if (used.length) await slot.settle(used[used.length - 1][0], sumUsage(used.map(([, u]) => u)));
+        else await slot.release(); // nothing was billed
+      }
       return json({ ...rec, name: prof.name, kind: prof.kind, slugs: rec.picks.map((p) => p.slug) });
     } catch (e) {
       console.error('[profile]', e);

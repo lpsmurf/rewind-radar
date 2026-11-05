@@ -9,6 +9,7 @@ export const CLERK_LINES = {
     "The store's AI is out of quarters for today, so I can't read new repos right now. Come back tomorrow, or ask me about a tape and I'll search the shelves.",
   budgetBusy:
     "The store's AI is out of quarters for today, so the clerk can't take that one right now. Come back tomorrow!",
+  busy: 'Still rewinding that one. Try again in a few minutes.',
   free: "My brain's on the fritz today, but I dug through the shelves for you. These look closest:",
   freeNone: "My brain's on the fritz and nothing on the shelves matched. Try different words, or come back tomorrow.",
   noRepo: "I looked everywhere, but GitHub doesn't have that one. Check the spelling, or make sure the repo is public.",
