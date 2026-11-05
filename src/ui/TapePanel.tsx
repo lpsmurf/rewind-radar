@@ -7,6 +7,20 @@ const KIND: Record<string, string> = {
   skill: 'SKILL', memory: 'SKILL', repo: 'NEW RELEASE', community: 'COMMUNITY', skene: 'SKILL',
 };
 
+/** RENT / SOURCE / VOTE buttons, shared by the tape panel and the releases browser. */
+export function TapeActions({ tape, onRent, onVote }: { tape: Tape; onRent(): void; onVote(): void }) {
+  const linked = isLinkedSkill(tape);
+  return (
+    <div className="row">
+      <button className="btn" onClick={onRent}>{linked ? 'GET FROM SOURCE' : tape.kind === 'skill' ? 'RENT · COPY INSTALL' : 'RENT · COPY CLONE'}</button>
+      <button className="btn alt" onClick={onVote}>VOTE ▲</button>
+      {tape.source_url && !linked && (
+        <a className="btn alt" href={tape.source_url} target="_blank" rel="noreferrer noopener">OPEN ON GITHUB</a>
+      )}
+    </div>
+  );
+}
+
 export default function TapePanel({ tape, onClose, onRent, onVote }: {
   tape: Tape; onClose(): void; onRent(): void; onVote(): void;
 }) {
@@ -33,13 +47,7 @@ export default function TapePanel({ tape, onClose, onRent, onVote }: {
         {tape.kind === 'skill' && !linked && <p className="small">Made by {tape.submitter ?? 'the house'}. Free to rent.</p>}
         <p className="blurb">{tape.blurb}</p>
         <p className="small">{tape.rentals} rentals · {tape.votes} votes this week</p>
-        <div className="row">
-          <button className="btn" onClick={onRent}>{linked ? 'GET FROM SOURCE' : tape.kind === 'skill' ? 'RENT · COPY INSTALL' : 'RENT · COPY CLONE'}</button>
-          <button className="btn alt" onClick={onVote}>VOTE ▲</button>
-          {tape.source_url && !linked && (
-            <a className="btn alt" href={tape.source_url} target="_blank" rel="noreferrer noopener">OPEN ON GITHUB</a>
-          )}
-        </div>
+        <TapeActions tape={tape} onRent={onRent} onVote={onVote} />
       </div>
     </div>
   );

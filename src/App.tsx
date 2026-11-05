@@ -3,6 +3,8 @@ import Store from './store/Store';
 import { useStore } from './lib/useStore';
 import { RING_COLORS, type Assessment, type RepoSummary, type Tape } from './types';
 import TapePanel from './ui/TapePanel';
+import ReleasesBrowser from './ui/ReleasesBrowser';
+import { weeklyReleases } from './store/rooms';
 import ClerkDrawer from './ui/ClerkDrawer';
 import SubmitModal from './ui/SubmitModal';
 import ProposalsBoard from './ui/ProposalsBoard';
@@ -14,6 +16,7 @@ import { BigQR, JoinCard } from './ui/JoinQR';
 export default function App() {
   const s = useStore();
   const [open, setOpen] = useState<Tape | null>(null);
+  const [browse, setBrowse] = useState<{ items: Tape[]; index: number; title: string } | null>(null);
   const [clerkOpen, setClerkOpen] = useState(false);
   const [submitOpen, setSubmitOpen] = useState(false);
   const [submitInitial, setSubmitInitial] = useState<{ title: string; url: string; note: string } | undefined>();
@@ -32,6 +35,13 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   const cur = open ? s.tapes.find((t) => t.id === open.id) ?? open : null;
+  // The weekly and monthly shelves open the full-screen browser over their own list; any other tape opens the panel.
+  const onTapeClick = (t: Tape, source?: 'weekly' | 'monthly') => {
+    const items = source === 'weekly' ? weeklyReleases(s.tapes) : source === 'monthly' ? s.monthly : [];
+    const index = items.findIndex((x) => x.id === t.id);
+    if (index < 0) return setOpen(t);
+    setBrowse({ items, index, title: source === 'weekly' ? 'WEEKLY NEW RELEASES' : 'MONTHLY PICKS' });
+  };
   const chips = s.tapes.filter((t) => s.highlighted.has(t.id));
   const openSubmit = (initial?: { title: string; url: string; note: string }) => {
     setSubmitInitial(initial);
@@ -66,7 +76,7 @@ export default function App() {
             highlighted={s.highlighted}
             top10={s.top10}
             monthly={s.monthly}
-            onTapeClick={setOpen}
+            onTapeClick={onTapeClick}
             onCounterClick={() => setClerkOpen(true)}
             onAisleChange={s.setAisle}
             onMove={s.move}
@@ -94,6 +104,7 @@ export default function App() {
         </aside>
       </main>
       {cur && <TapePanel tape={cur} onClose={() => setOpen(null)} onRent={() => s.rent(cur)} onVote={() => s.vote(cur)} />}
+      {browse && <ReleasesBrowser items={browse.items.map((x) => s.tapes.find((t) => t.id === x.id) ?? x)} startIndex={browse.index} title={browse.title} onClose={() => setBrowse(null)} onRent={s.rent} onVote={s.vote} />}
       {clerkOpen && <ClerkDrawer onClose={() => setClerkOpen(false)} ask={s.askClerk} scan={s.scanProfile} chips={chips} onOpen={(t) => setOpen(t)} github={s.github} onForget={s.forgetGithub} tapes={s.tapes} onShelve={onShelve} member={s.member} canSignIn={s.canSignIn} onConnect={s.connectGithub} onSignIn={s.signIn} onSignOut={s.signOut} />}
       {submitOpen && <SubmitModal onClose={() => setSubmitOpen(false)} submit={s.submit} initial={submitInitial} />}
       {proposeOpen && <ProposeModal onClose={() => setProposeOpen(false)} propose={s.propose} />}
