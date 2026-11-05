@@ -106,6 +106,29 @@ export async function budgetLeft(o: { failClosed?: boolean } = {}): Promise<bool
   }
 }
 
+/**
+ * Database-backed caps on new Sonnet assessments, shared by every Edge isolate: assessments per hour, and
+ * assess spend per UTC day (its own, smaller budget than the clerk's). Fails closed if the query breaks.
+ */
+async function checkAssessLimits(): Promise<void> {
+  const now = Date.now();
+  const dayStart = new Date(now);
+  dayStart.setUTCHours(0, 0, 0, 0);
+  const maxPerHour = Number(env('AI_ASSESS_MAX_PER_HOUR') || '20');
+  const budget = Number(env('AI_ASSESS_BUDGET_USD') || '2');
+  let rows: { at: string; cost_usd: number }[];
+  try {
+    const { data, error } = await admin().from('ai_usage').select('at,cost_usd').eq('route', 'assess').gte('at', dayStart.toISOString());
+    if (error) throw error;
+    rows = (data ?? []) as typeof rows;
+  } catch (e) {
+    console.warn('[assess] usage query failed, blocking', e);
+    throw new BudgetError();
+  }
+  if (rows.filter((r) => now - Date.parse(r.at) < 3600_000).length >= maxPerHour) throw new RateLimitError();
+  if (rows.reduce((sum, r) => sum + Number(r.cost_usd ?? 0), 0) >= budget) throw new BudgetError();
+}
+
 /** Log one Anthropic call to ai_usage and return its cost. Never throws. */
 export async function recordUsage(route: string, model: string, usage: Usage, repo?: string): Promise<number> {
   const cost = costUsd(model, usage);
@@ -166,6 +189,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     if (row) return fromRow(row, true);
     throw new BudgetError();
   }
+  await checkAssessLimits();
 
   try {
     const facts = await fetchRepoFacts(ref);

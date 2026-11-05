@@ -16,15 +16,34 @@ const CORS: Record<string, string> = {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...CORS, 'content-type': 'application/json' } });
 
-// Per-instance rate limits (good enough for a demo).
+// Per-instance rate limits (good enough for a demo; the Sonnet limits also live in the database).
 const hits = new Map<string, number[]>();
+const MAX_KEYS = 5000;
+const HOUR = 3600_000;
+function prune(now: number) {
+  for (const [k, ts] of hits) if (ts.every((t) => now - t >= HOUR)) hits.delete(k);
+  // still over the cap: drop the oldest entries (Map keeps insertion order)
+  for (const k of hits.keys()) {
+    if (hits.size <= MAX_KEYS) break;
+    hits.delete(k);
+  }
+}
 function limited(id: string, max: number): boolean {
+  const key = id.slice(0, 100);
   const now = Date.now();
-  const arr = (hits.get(id) ?? []).filter((t) => now - t < 3600_000);
-  if (arr.length >= max) return hits.set(id, arr), true;
-  arr.push(now);
-  hits.set(id, arr);
-  return false;
+  const arr = (hits.get(key) ?? []).filter((t) => now - t < HOUR);
+  hits.delete(key); // re-insert so the newest keys sit last
+  const over = arr.length >= max;
+  if (!over) arr.push(now);
+  hits.set(key, arr);
+  if (hits.size > MAX_KEYS) prune(now);
+  return over;
+}
+
+/** The client IP: the last x-forwarded-for hop is the one our proxy appended; earlier hops are client-supplied. */
+function clientKey(req: Request): string {
+  const hops = (req.headers.get('x-forwarded-for') ?? '').split(',').map((h) => h.trim()).filter(Boolean);
+  return (hops[hops.length - 1] ?? 'anon').slice(0, 64);
 }
 
 /** Run an AI call, collect its usage, and record it (even if the call throws). */
@@ -42,9 +61,8 @@ const TAPE_COLS = 'id,kind,slug,title,genre,blurb,source_url,stars,language,ring
 export async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
   const path = new URL(req.url).pathname.replace(/^.*?\/api\/?/, '').replace(/\/$/, '');
-  const ip = req.headers.get('x-forwarded-for') ?? 'anon';
+  const who = clientKey(req);
   const body = req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
-  const who = String(body.visitorId ?? ip);
 
   // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
@@ -55,7 +73,7 @@ export async function handle(req: Request): Promise<Response> {
 
     if (q.kind === 'repo') {
       try {
-        const got = await getAssessment(q.ref, { allowMiss: () => !limited('assess:' + who, 5) && !limited('assess:all', 60) });
+        const got = await getAssessment(q.ref, { allowMiss: () => !limited('assess:' + who, 5) });
         if (got) {
           const { owner, repo } = q.ref;
           const { data: tape } = await admin()

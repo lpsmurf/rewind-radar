@@ -16,11 +16,14 @@ const ref = parseRepoRef('https://github.com/gitroomhq/postiz-app')!;
 const allow = { allowMiss: () => true };
 const CANDS = [{ slug: 'diagram-design', title: 'Diagram Design', genre: 'Design', blurb: 'b', kind: 'skill', match: true }];
 
-function setup(row: Record<string, unknown> | null, spent = 0) {
+type Usage = { at: string; cost_usd: number };
+function setup(row: Record<string, unknown> | null, spent = 0, usage: Usage[] | 'error' = []) {
   db.current = fakeDb({
     assessments: (q: Query) => (has(q, 'select') && !has(q, 'upsert') ? { data: row, error: null } : { data: null, error: null }),
     'rpc:search_tapes': () => ({ data: CANDS, error: null }),
     'rpc:ai_spend_today': () => ({ data: spent, error: null }),
+    ai_usage: (q: Query) =>
+      has(q, 'select') ? (usage === 'error' ? { data: null, error: { message: 'boom' } } : { data: usage, error: null }) : { data: null, error: null },
   });
   return db.current;
 }
@@ -111,5 +114,60 @@ describe('getAssessment', () => {
     setup(row({ updated_at: daysAgo(8) }), 1.5);
     expect(await getAssessment(ref, allow)).toMatchObject({ stale: true });
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe('database-backed assess limits', () => {
+  const at = (minsAgo: number) => ({ at: new Date(Date.now() - minsAgo * 60_000).toISOString(), cost_usd: 0.01 });
+
+  it('reads today\'s assess usage rows from ai_usage', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    await getAssessment(ref, allow);
+    const q = d.calls('ai_usage').find((x: Query) => has(x, 'select'))!;
+    expect(arg(q, 'select')).toBe('at,cost_usd');
+    expect(has(q, 'eq', 'route', 'assess')).toBe(true);
+    const since = q.calls.find((c: any) => c[0] === 'gte')!;
+    expect(since[1]).toBe('at');
+    expect(String(since[2])).toBe(new Date().toISOString().slice(0, 10) + 'T00:00:00.000Z');
+  });
+
+  it('stops a new Sonnet call once AI_ASSESS_MAX_PER_HOUR assessments ran in the last hour', async () => {
+    vi.stubEnv('AI_ASSESS_MAX_PER_HOUR', '3');
+    setup(null, 0, [at(1), at(10), at(59), at(120)]);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(RateLimitError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('defaults to 20 an hour', async () => {
+    const many = Array.from({ length: 20 }, () => at(5));
+    setup(null, 0, many);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(RateLimitError);
+  });
+
+  it('does not count rows older than an hour toward the hourly cap', async () => {
+    stubGitHub(POSTIZ);
+    vi.stubEnv('AI_ASSESS_MAX_PER_HOUR', '3');
+    setup(null, 0, [at(61), at(90), at(120)]);
+    expect((await getAssessment(ref, allow))!.cached).toBe(false);
+  });
+
+  it('stops new assessments once today\'s assess spend reaches AI_ASSESS_BUDGET_USD', async () => {
+    vi.stubEnv('AI_ASSESS_BUDGET_USD', '0.5');
+    setup(null, 0, [{ ...at(300), cost_usd: 0.3 }, { ...at(200), cost_usd: 0.25 }]);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BudgetError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the usage query errors', async () => {
+    setup(null, 0, 'error');
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BudgetError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('does not check the database limits for a cached row', async () => {
+    const d = setup(row(), 0, 'error');
+    expect(await getAssessment(ref, allow)).toMatchObject({ cached: true });
+    expect(d.calls('ai_usage')).toHaveLength(0);
   });
 });

@@ -18,8 +18,10 @@ const CANDS = [
 ];
 let n = 0;
 const vid = () => `visitor-${++n}-${Math.random().toString(16).slice(2, 8)}`;
-const post = async (path: string, body: Record<string, unknown>) => {
-  const r = await handle(new Request('http://localhost/api/' + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+let ips = 0;
+/** Each call gets its own client IP unless one is passed: rate limits key on the IP now. */
+const post = async (path: string, body: Record<string, unknown>, xff: string = `10.0.0.${++ips}`) => {
+  const r = await handle(new Request('http://localhost/api/' + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': xff }, body: JSON.stringify(body) }));
   return { status: r.status, body: (await r.json()) as any };
 };
 
@@ -150,13 +152,13 @@ describe('POST /clerk: pasted repos', () => {
     expect(r.status).toBe(503);
   });
 
-  it('limits a visitor to 5 new assessments an hour', async () => {
+  it('limits a client IP to 5 new assessments an hour', async () => {
     stubGitHub(POSTIZ);
     setup();
     create.mockResolvedValue(jsonReply(SAMPLE));
-    const visitorId = vid();
-    for (let i = 0; i < 5; i++) expect((await post('clerk', { question: 'gitroomhq/postiz-app', visitorId })).status).toBe(200);
-    const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId });
+    const ip = '9.9.9.9';
+    for (let i = 0; i < 5; i++) expect((await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip)).status).toBe(200);
+    const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip);
     expect(r.status).toBe(429);
     expect(r.body.error).toBe(CLERK_LINES.rateLimit);
   });
@@ -274,5 +276,33 @@ describe('POST radar/refresh', () => {
     expect(r.body).toMatchObject({ ok: true, stocked: 1 });
     const rows = d.calls('ai_usage').filter((q: Query) => has(q, 'insert'));
     expect(rows.map((q: Query) => (q.calls.find((c) => c[0] === 'insert')![1] as any).route)).toEqual(['radar']);
+  });
+});
+
+describe('rate limits key on the client IP, not the body', () => {
+  const ask = (xff: string) => post('clerk', { question: 'a skill for making diagrams', visitorId: vid() }, xff);
+  const okReply = () => create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'ok', slugs: [], aisle: 'counter' }));
+
+  it('shares one bucket across different visitorIds from the same IP', async () => {
+    setup();
+    okReply();
+    for (let i = 0; i < 15; i++) expect((await ask('7.7.7.7')).status).toBe(200);
+    expect((await ask('7.7.7.7')).status).toBe(429);
+    expect((await ask('7.7.7.8')).status).toBe(200);
+  });
+
+  it('keys on the last x-forwarded-for hop, so a spoofed first hop does not help', async () => {
+    setup();
+    okReply();
+    for (let i = 0; i < 15; i++) expect((await ask(`1.2.3.${i}, 6.6.6.6`)).status).toBe(200);
+    expect((await ask('1.2.3.4,  6.6.6.6 ')).status).toBe(429);
+  });
+
+  it('falls back to a shared "anon" bucket without the header', async () => {
+    setup();
+    okReply();
+    const bare = () => handle(new Request('http://localhost/api/clerk', { method: 'POST', body: JSON.stringify({ question: 'a skill for diagrams', visitorId: vid() }) }));
+    for (let i = 0; i < 15; i++) expect((await bare()).status).toBe(200);
+    expect((await bare()).status).toBe(429);
   });
 });
