@@ -64,7 +64,11 @@ export async function searchWeekly(n = 20): Promise<RepoInfo[]> {
 }
 
 /** Read a public GitHub user (or a single repo) so the clerk can recommend tapes for it. */
-export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'repo'; name: string; text: string } | null> {
+export interface ProfileFacets {
+  owner: string;
+  repos: { name: string; language: string | null; topics: string[] }[];
+}
+export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'repo'; name: string; text: string; facets: ProfileFacets } | null> {
   const s = input.trim().replace(/^@/, '').replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\.git$/, '').replace(/\/+$/, '');
   if (!/^[\w.-]+(\/[\w.-]+)?$/.test(s)) return null;
   if (s.includes('/')) {
@@ -74,6 +78,7 @@ export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'rep
       kind: 'repo',
       name: r.full_name,
       text: `REPO ${r.full_name} (${r.language ?? 'unknown'}, ${r.stars}★)\n${r.description ?? ''}\n\nREADME:\n${r.readme.slice(0, 3500)}`,
+      facets: { owner: r.full_name.split('/')[0], repos: [{ name: r.full_name.split('/')[1] ?? r.full_name, language: r.language, topics: [] }] },
     };
   }
   const u = await fetch(`https://api.github.com/users/${s}`, { headers: headers() });
@@ -88,6 +93,7 @@ export async function fetchProfile(input: string): Promise<{ kind: 'user' | 'rep
     kind: 'user',
     name: user.login,
     text: `USER ${user.login}${user.name ? ` (${user.name})` : ''}\nbio: ${user.bio ?? ''}\npublic repos: ${user.public_repos}\n\nRecently active repos:\n${lines.join('\n')}`,
+    facets: { owner: String(user.login), repos: repos.map((x) => ({ name: String(x.name), language: x.language ?? null, topics: Array.isArray(x.topics) ? x.topics : [] })) },
   };
 }
 
@@ -166,6 +172,9 @@ export const clearRepoExistsCache = () => {
   exists.clear();
   users.clear();
   inflight.clear();
+  searches.clear();
+  searching.clear();
+  searchTimes.length = 0;
 };
 
 /**
@@ -241,4 +250,128 @@ export async function fetchRepoFacts(ref: RepoRef): Promise<RepoFacts | null> {
     contents,
     readme,
   };
+}
+
+// ---------- repo search (the official Search API, never HTML scraping) ----------
+/** A repo found by search. The first nine fields are what the UI shows; forks, open_issues and created_at let healthSignals run on a hit. */
+export interface RepoHit {
+  full_name: string;
+  html_url: string;
+  description: string | null;
+  stars: number;
+  language: string | null;
+  license: string | null; // SPDX id
+  pushed_at: string;
+  archived: boolean;
+  topics: string[];
+  forks: number;
+  open_issues: number;
+  created_at: string;
+}
+
+const SEARCH_TTL = 3600_000;
+const SEARCH_MAX = 500;
+const SEARCH_PER_MINUTE = 25; // GitHub allows 30 a minute; the ceiling is per isolate
+const searches = new Map<string, { at: number; hits: RepoHit[] }>(); // insertion order = age
+const searching = new Map<string, Promise<RepoHit[]>>(); // concurrent identical searches share one call
+const searchTimes: number[] = [];
+
+const STOP = new Set(
+  ('a an and are as at be by can for from get how i in is it me my of on or that the this to want what which with you ' +
+    'need find looking something some any please skill skills tool tools repo repos github').split(' '),
+);
+
+/** Plain lowercase keywords: quotes, qualifiers (`user:x`), operators and punctuation are dropped; at most 5 distinct terms. */
+export function searchTerms(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of text.toLowerCase().split(/\s+/)) {
+    if (raw.includes(':')) continue; // a qualifier such as user:foo or stars:>1
+    const t = raw.replace(/[^a-z0-9+#._-]/g, '').replace(/^[-.]+|[.]+$/g, '');
+    if (t.length < 2 || STOP.has(t) || t === 'and' || t === 'or' || t === 'not' || out.includes(t)) continue;
+    out.push(t);
+    if (out.length === 5) break;
+  }
+  return out;
+}
+
+/** The full q= string. `language` is a single GitHub language name, checked before it is used as a qualifier. */
+export function searchQuery(terms: string[], language?: string | null, now = Date.now()): string {
+  const since = new Date(now - 365 * 864e5).toISOString().slice(0, 10);
+  const lang = language && /^[A-Za-z0-9+#.-]{1,30}$/.test(language) ? ` language:${language}` : '';
+  return `${terms.join(' ')}${lang} stars:>30 archived:false pushed:>${since}`.trim();
+}
+
+const toHit = (it: any): RepoHit => ({
+  full_name: String(it.full_name),
+  html_url: String(it.html_url),
+  description: it.description ?? null,
+  stars: it.stargazers_count ?? 0,
+  language: it.language ?? null,
+  license: it.license?.spdx_id && it.license.spdx_id !== 'NOASSERTION' ? it.license.spdx_id : null,
+  pushed_at: it.pushed_at ?? '',
+  archived: !!it.archived,
+  topics: Array.isArray(it.topics) ? it.topics.filter((x: unknown) => typeof x === 'string') : [],
+  forks: it.forks_count ?? 0,
+  open_issues: it.open_issues_count ?? 0,
+  created_at: it.created_at ?? '',
+});
+
+/**
+ * Top-starred, recently pushed, live repos for some keywords. Cached an hour per normalised query (bounded), identical
+ * concurrent searches share one call, and at most 25 real calls a minute leave this isolate. Never throws: a refusal
+ * (403/429/5xx), a network error or the ceiling gives [] and a warning.
+ */
+export async function searchRepos(q: string, o: { limit?: number; language?: string | null } = {}): Promise<RepoHit[]> {
+  const terms = searchTerms(q);
+  const limit = Math.min(Math.max(Math.floor(o.limit ?? 8), 1), 30);
+  if (!terms.length && !o.language) return [];
+  const key = `${terms.join(' ')}|${(o.language ?? '').toLowerCase()}|${limit}`;
+  const hit = searches.get(key);
+  if (hit && Date.now() - hit.at < SEARCH_TTL) return hit.hits;
+  const flying = searching.get(key);
+  if (flying) return flying;
+  const now = Date.now();
+  while (searchTimes.length && now - searchTimes[0] >= 60_000) searchTimes.shift();
+  if (searchTimes.length >= SEARCH_PER_MINUTE) {
+    console.warn('[github:search] per-minute ceiling reached, skipping');
+    return [];
+  }
+  searchTimes.push(now);
+  const p = (async () => {
+    try {
+      const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery(terms, o.language, now))}&sort=stars&order=desc&per_page=${limit}`;
+      const r = await fetch(url, { headers: headers() });
+      if (!r.ok) throw new GitHubError(r.status);
+      const j: any = await r.json();
+      const hits = (Array.isArray(j.items) ? j.items : []).filter((it: any) => it && it.full_name && it.html_url && !it.archived).slice(0, limit).map(toHit);
+      searches.delete(key);
+      searches.set(key, { at: Date.now(), hits });
+      if (searches.size > SEARCH_MAX) searches.delete(searches.keys().next().value as string);
+      return hits;
+    } catch (e) {
+      console.warn('[github:search] failed, continuing without GitHub results', e instanceof Error ? e.message : e);
+      return [];
+    }
+  })().finally(() => searching.delete(key));
+  searching.set(key, p);
+  return p;
+}
+
+const top = (counts: Map<string, number>, n: number) => [...counts].sort((a, b) => b[1] - a[1]).slice(0, n).map(([k]) => k);
+
+/** Up to 2 GitHub searches for a visitor: their top language with their top topics, then the next topics (or their second language). */
+export function profileQueries(f: ProfileFacets): { text: string; language: string | null }[] {
+  const langs = new Map<string, number>();
+  const topics = new Map<string, number>();
+  for (const r of f.repos) {
+    if (r.language) langs.set(r.language, (langs.get(r.language) ?? 0) + 1);
+    for (const t of r.topics) if (/^[a-z0-9][a-z0-9-]*$/.test(t)) topics.set(t, (topics.get(t) ?? 0) + 1);
+  }
+  const [lang, lang2] = top(langs, 2);
+  const tops = top(topics, 4);
+  const out: { text: string; language: string | null }[] = [];
+  if (lang || tops.length) out.push({ text: tops.slice(0, 2).join(' '), language: lang ?? null });
+  if (tops.length > 2) out.push({ text: tops.slice(2, 4).join(' '), language: lang ?? null });
+  else if (lang2 && tops.length) out.push({ text: tops.slice(0, 2).join(' '), language: lang2 });
+  return out;
 }

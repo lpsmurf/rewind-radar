@@ -1,11 +1,11 @@
 import { admin } from './admin.ts';
 import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
-import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
-import { candidates } from './catalog.ts';
+import { BudgetError, BusyError, budgetLeft, getAssessment, healthSignals, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
+import { candidates, inStore, type CatalogRow } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
-import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
+import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef, profileQueries, searchRepos, type RepoFacts, type RepoHit } from './github.ts';
 import { collectAssessBatches, submitAssessBatch } from './batchAssess.ts';
 import { buildMonthlyPicks, previousMonth } from './monthly.ts';
 import { refreshRadar } from './radar.ts';
@@ -135,6 +135,41 @@ function clientKey(req: Request): string {
 // CLERK_MAX_PER_HOUR is a per-isolate ceiling on every clerk Anthropic call, whoever asks.
 const clerkCeiling = (dry = false) => limited('ceiling:clerk', Number(env('CLERK_MAX_PER_HOUR') || '300'), dry);
 
+// GitHub top-up searches (store first, GitHub for gaps): per identity and per IP, per hour.
+const GH_TOPUP = { ident: 20, ip: 40 };
+const STORE_ENOUGH = 3; // store text matches that make a GitHub search unnecessary
+
+/** GitHub repos for a question the store answers weakly. [] when the store is enough, the visitor is over a limit, or GitHub is unavailable. */
+async function githubTopUp(text: string, rows: { match?: boolean }[], who: string, idKey: string): Promise<RepoHit[]> {
+  if (rows.filter((r) => r.match).length >= STORE_ENOUGH) return [];
+  if (limited('ghsearch:' + who, GH_TOPUP.ip, true) || limited(`ghsearch:${idKey}`, GH_TOPUP.ident, true)) return [];
+  limited('ghsearch:' + who, GH_TOPUP.ip);
+  limited(`ghsearch:${idKey}`, GH_TOPUP.ident);
+  const hits = await searchRepos(text, { limit: 8 }); // never throws
+  if (!hits.length) return [];
+  const have = await inStore(hits);
+  return hits.filter((h) => !have.has(h.full_name.toLowerCase()));
+}
+
+/** GitHub repos for a profile radar: up to 2 searches, minus the visitor's own repos and anything the store already has. */
+async function profileHits(prof: NonNullable<Awaited<ReturnType<typeof fetchProfile>>>): Promise<RepoHit[]> {
+  const found = (await Promise.all(profileQueries(prof.facets).map((q) => searchRepos(q.text, { limit: 10, language: q.language })))).flat();
+  const owner = prof.facets.owner.toLowerCase();
+  const mine = new Set(prof.facets.repos.map((r) => `${owner}/${r.name}`.toLowerCase()));
+  const uniq = new Map<string, RepoHit>();
+  for (const h of found) {
+    const key = h.full_name.toLowerCase();
+    // a user's radar leaves out everything they own; a repo's radar leaves out that repo
+    if (uniq.has(key) || mine.has(key) || (prof.kind === 'user' && key.startsWith(owner + '/'))) continue;
+    uniq.set(key, h);
+  }
+  const have = await inStore([...uniq.values()]);
+  return [...uniq.values()].filter((h) => !have.has(h.full_name.toLowerCase()));
+}
+
+/** What healthSignals needs from a search hit. */
+const hitFacts = (h: RepoHit): RepoFacts => ({ ...h, contents: [], readme: '' });
+
 const CLERK_LIMITS = {
   light: { ask: 15, assess: 5, ipAsk: 15, ipAssess: 5 },
   member: { ask: 40, assess: 10, ipAsk: 60, ipAssess: 10 },
@@ -245,9 +280,10 @@ export async function handle(req: Request): Promise<Response> {
         if (!hits.length) return json({ answer: CLERK_LINES.freeNone, ...plain });
         return json({ answer: CLERK_LINES.free, slugs: hits.map((r) => r.slug), aisle: aisleOf(hits[0] as Parameters<typeof aisleOf>[0]) });
       }
-      const out = await meter('clerk', (onUsage) => clerk(text, rows, onUsage));
+      const extra = await githubTopUp(text, rows, who, idKey);
+      const out = await meter('clerk', (onUsage) => clerk(text, rows, onUsage, extra));
       if (!out.on_topic) return json({ answer: CLERK_LINES.offTopic, ...plain });
-      return json({ answer: out.answer, slugs: out.slugs, aisle: out.aisle });
+      return json({ answer: out.answer, slugs: out.slugs, aisle: out.aisle, github: out.github });
     } catch (e) {
       console.error('[clerk]', e);
       return json({ error: 'The clerk is on break.' }, 500);
@@ -262,8 +298,14 @@ export async function handle(req: Request): Promise<Response> {
     try {
       const prof = await fetchProfile(github);
       if (!prof) return json({ error: "Couldn't find that GitHub user or repo" }, 404);
-      const { data, error } = await admin().from('tapes').select('slug,title,genre,blurb,kind').eq('archived', false).limit(400);
-      if (error) return json({ error: 'Catalog unavailable' }, 500);
+      // live repo + community tapes (newest 250) and skills (120): the store is searched first, GitHub only tops it up
+      const cols = 'slug,title,genre,blurb,kind';
+      const [repoRows, skillRows] = await Promise.all([
+        admin().from('tapes').select(cols).eq('archived', false).in('kind', ['repo', 'community']).order('created_at', { ascending: false }).limit(250),
+        admin().from('tapes').select(cols).eq('archived', false).eq('kind', 'skill').limit(120),
+      ]);
+      if (repoRows.error || skillRows.error) return json({ error: 'Catalog unavailable' }, 500);
+      const catalog = [...(repoRows.data ?? []), ...(skillRows.data ?? [])] as CatalogRow[];
       if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
       let slot;
       try {
@@ -280,12 +322,20 @@ export async function handle(req: Request): Promise<Response> {
       const used: [string, Parameters<OnUsage>[1]][] = [];
       let rec;
       try {
-        rec = await recommendForProfile(prof.text, data ?? [], (m, u) => used.push([m, u]));
+        const hits = await profileHits(prof);
+        rec = await recommendForProfile(prof.text, catalog, hits, (m, u) => used.push([m, u]));
       } finally {
         if (used.length) await slot.settle(used[used.length - 1][0], sumUsage(used.map(([, u]) => u)));
         else await slot.release(); // nothing was billed
       }
-      return json({ ...rec, name: prof.name, kind: prof.kind, slugs: rec.picks.map((p) => p.slug) });
+      const picks = rec.repos.map((p) =>
+        p.type === 'tape'
+          ? { type: 'tape' as const, slug: p.slug, why: p.why }
+          : { type: 'github' as const, repo: { ...p.hit, signals: healthSignals(hitFacts(p.hit)) }, why: p.why },
+      );
+      // slugs: the store repos then the skills, as the first version of the radar returned them
+      const slugs = [...rec.repos.flatMap((p) => (p.type === 'tape' ? [p.slug] : [])), ...rec.skills.map((x) => x.slug)];
+      return json({ answer: rec.answer, aisle: rec.aisle, name: prof.name, kind: prof.kind, picks, skills: rec.skills, slugs });
     } catch (e) {
       console.error('[profile]', e);
       return json({ error: 'The clerk is on break.' }, 500);

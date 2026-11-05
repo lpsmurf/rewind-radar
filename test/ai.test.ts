@@ -18,7 +18,7 @@ describe('clerk (guarded, Haiku)', () => {
     create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Rent this.', slugs: ['diagram-design', 'ghost'], aisle: 'Design' }));
     const onUsage = vi.fn();
     const out = await clerk('a skill for diagrams', cands, onUsage);
-    expect(out).toEqual({ on_topic: true, answer: 'Rent this.', slugs: ['diagram-design'], aisle: 'Design' });
+    expect(out).toEqual({ on_topic: true, answer: 'Rent this.', slugs: ['diagram-design'], github: [], aisle: 'Design' });
     const req = create.mock.calls[0][0];
     expect(req.model).toBe(HAIKU);
     expect(req.tool_choice).toEqual({ type: 'tool', name: 'recommend' });
