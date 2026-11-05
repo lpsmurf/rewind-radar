@@ -8,7 +8,7 @@ vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } 
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
 import { budgetLeft, BudgetError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
-import { parseRepoRef, repoExists } from '../lib/github.ts';
+import { clearRepoExistsCache, parseRepoRef, repoExists } from '../lib/github.ts';
 import { AssessError, SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
 
@@ -280,11 +280,46 @@ describe('bare owner/repo guesses', () => {
     expect(seen).toHaveLength(0);
   });
 
+  it('asks GitHub once for two "tcp/ip" questions (negative cache, case-insensitive)', async () => {
+    const seen = stubGitHub({});
+    setup(null);
+    expect(await getAssessment(bare, allow)).toBeNull();
+    expect(await getAssessment(parseRepoRef('TCP/IP')!, allow)).toBeNull();
+    expect(seen).toHaveLength(1);
+  });
+
+  it('caches hits too, and does not cache GitHub errors', async () => {
+    const seen = stubGitHub(POSTIZ);
+    expect(await repoExists(bareP)).toBe(true);
+    expect(await repoExists(bareP)).toBe(true);
+    expect(seen).toHaveLength(1);
+    stubGitHub({ '/repos/a/b': 403 });
+    const ab = parseRepoRef('a/b')!;
+    await expect(repoExists(ab)).rejects.toMatchObject({ status: 403 });
+    stubGitHub({ '/repos/a/b': { body: '{}' } });
+    expect(await repoExists(ab)).toBe(true);
+  });
+
+  it('expires misses after an hour and hits after ten minutes', async () => {
+    vi.useFakeTimers();
+    const seen = stubGitHub({ '/repos/gitroomhq/postiz-app': { body: '{}' } });
+    await repoExists(bare);
+    await repoExists(bareP);
+    vi.advanceTimersByTime(11 * 60_000);
+    await repoExists(bare); // miss still cached
+    await repoExists(bareP); // hit expired
+    expect(seen).toHaveLength(3);
+    vi.advanceTimersByTime(50 * 60_000);
+    await repoExists(bare);
+    expect(seen).toHaveLength(4);
+  });
+
   it('repoExists: 404 is false, 200 true, anything else throws', async () => {
     stubGitHub({});
     expect(await repoExists(bare)).toBe(false);
     stubGitHub(POSTIZ);
     expect(await repoExists(bareP)).toBe(true);
+    clearRepoExistsCache(); // the 200 above is cached now
     stubGitHub({ '/repos/gitroomhq/postiz-app': 403 });
     await expect(repoExists(bareP)).rejects.toMatchObject({ status: 403 });
   });
