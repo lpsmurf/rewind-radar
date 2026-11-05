@@ -6,8 +6,9 @@ import { MOCK_TAPES } from '../data/mock';
 import { sb } from './supabase';
 import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './clerkGate';
 import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
-import { createSendGate, H, W } from '../store/movement';
-import { acceptMove, capName, rememberPos, safeColor } from '../store/remote';
+import { createSendGate } from '../store/movement';
+import { acceptMove, rememberPos } from '../store/remote';
+import { visitorsFromPresence } from '../store/presence';
 import { deletedId, mergeChat, removeChat, type ChatEntry, type ChatMsg } from '../store/chat';
 
 const CHAT_COLS = 'id,at,sender_key,login,tier,body';
@@ -143,15 +144,7 @@ export function useStore() {
     });
     ch.on('presence', { event: 'sync' }, () => {
       const st = ch.presenceState() as Record<string, any[]>;
-      const next = Object.entries(st)
-        .filter(([k]) => k !== keyRef.current)
-        .map(([k, v]) => {
-          const live = remotePos.current.get(k);
-          const px = v[0]?.x, py = v[0]?.y; // presence is untrusted too
-          const x = live?.x ?? (typeof px === 'number' && Number.isFinite(px) ? Math.max(0, Math.min(W, px)) : undefined);
-          const y = live?.y ?? (typeof py === 'number' && Number.isFinite(py) ? Math.max(0, Math.min(H, py)) : undefined);
-          return { id: k, name: capName(v[0]?.name) ?? 'GUEST', color: safeColor(v[0]?.color, '#fff6d5'), aisle: v[0]?.aisle ?? 'entrance', ...(x !== undefined && y !== undefined ? { x, y } : {}) } as Visitor;
-        });
+      const next = visitorsFromPresence(st, keyRef.current, remotePos.current);
       for (const k of remotePos.current.keys()) if (!(k in st)) remotePos.current.delete(k);
       visitorsRef.current = next;
       setVisitors(next);
