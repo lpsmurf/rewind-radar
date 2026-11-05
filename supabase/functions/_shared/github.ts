@@ -160,10 +160,12 @@ const exists = new Map<string, { at: number; ok: boolean }>(); // insertion orde
 const EXISTS_MAX = 2000;
 const EXISTS_TTL = { miss: 3600_000, hit: 600_000 };
 const users = new Map<string, { at: number; ok: boolean }>();
+const inflight = new Map<string, Promise<boolean>>(); // concurrent checks of one login share one GitHub call
 const USER_TTL = { hit: 3600_000, miss: 600_000 };
 export const clearRepoExistsCache = () => {
   exists.clear();
   users.clear();
+  inflight.clear();
 };
 
 /**
@@ -189,15 +191,27 @@ export async function repoExists(ref: RepoRef): Promise<boolean> {
  */
 export async function githubUserExists(login: string): Promise<boolean> {
   const key = login.toLowerCase();
-  const hit = users.get(key);
-  if (hit && Date.now() - hit.at < (hit.ok ? USER_TTL.hit : USER_TTL.miss)) return hit.ok;
-  const r = await fetch(`https://api.github.com/users/${encodeURIComponent(login)}`, { headers: headers() });
-  if (r.status !== 404 && !r.ok) throw new GitHubError(r.status);
-  const ok = r.status !== 404;
-  users.delete(key);
-  users.set(key, { at: Date.now(), ok });
-  if (users.size > EXISTS_MAX) users.delete(users.keys().next().value as string);
-  return ok;
+  const hit = peekGithubUser(login);
+  if (hit !== undefined) return hit;
+  const flying = inflight.get(key);
+  if (flying) return flying;
+  const p = (async () => {
+    const r = await fetch(`https://api.github.com/users/${encodeURIComponent(login)}`, { headers: headers() });
+    if (r.status !== 404 && !r.ok) throw new GitHubError(r.status);
+    const ok = r.status !== 404;
+    users.delete(key);
+    users.set(key, { at: Date.now(), ok });
+    if (users.size > EXISTS_MAX) users.delete(users.keys().next().value as string);
+    return ok;
+  })().finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}
+
+/** The cached answer for a login (true/false), or undefined when a GitHub call would be needed. */
+export function peekGithubUser(login: string): boolean | undefined {
+  const hit = users.get(login.toLowerCase());
+  return hit && Date.now() - hit.at < (hit.ok ? USER_TTL.hit : USER_TTL.miss) ? hit.ok : undefined;
 }
 
 /** Facts the assessment is built on. null = no such repo; throws GitHubError when GitHub refuses (e.g. rate limit). */
