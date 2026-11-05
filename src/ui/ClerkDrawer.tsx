@@ -1,12 +1,20 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { Assessment, ClerkReply, RepoSummary, Tape } from '../types';
 import AssessmentCard from './AssessmentCard';
 import { gateState, type Member } from '../lib/clerkGate';
+import { answerItems, type ClerkAnswer, type RepoHit } from '../lib/radar';
+import type { ScanResult } from '../lib/useStore';
+import { formatStars } from '../lib/stars';
+import type { BrowseItem } from './releasesNav';
 
-interface Msg { who: 'you' | 'clerk'; text: string; reply?: ClerkReply }
+interface Msg { who: 'you' | 'clerk'; text: string; reply?: ClerkReply; github?: RepoHit[]; slugs?: string[] }
 
-export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github, onForget, tapes, onShelve, member, canSignIn, onConnect, onSignIn, onSignOut }: {
-  onClose(): void; ask(q: string): Promise<ClerkReply>; scan(github: string): Promise<string>; chips: Tape[]; onOpen(t: Tape): void;
+export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github, onForget, tapes, onShelve, member, canSignIn, onConnect, onSignIn, onSignOut, autoAsk, hasRadar, onViewRadar, onRadar, onBrowse }: {
+  /** A question to send as soon as the drawer sees it (the browser's ASSESS IT); `n` makes a repeat count as new. */
+  autoAsk?: { q: string; n: number } | null; hasRadar: boolean; onViewRadar(): void; onRadar(r: NonNullable<ScanResult['radar']>): void;
+  /** Open the releases browser on items, starting at `index`. */
+  onBrowse(items: BrowseItem[], index: number, title: string): void;
+  onClose(): void; ask(q: string): Promise<ClerkAnswer>; scan(github: string): Promise<ScanResult>; chips: Tape[]; onOpen(t: Tape): void;
   github: string | null; onForget(): void; tapes: Tape[]; onShelve(r: RepoSummary, a: Assessment): void;
   member: Member | null; canSignIn: boolean; onConnect(u: string): void; onSignIn(): void; onSignOut(): void;
 }) {
@@ -16,9 +24,7 @@ export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github,
   const [log, setLog] = useState<Msg[]>([{ who: 'clerk', text: 'Welcome! What are you looking for today?' }]);
   const [busy, setBusy] = useState(false);
 
-  async function go(e: React.FormEvent) {
-    e.preventDefault();
-    const text = q.trim();
+  async function send(text: string) {
     if (!text || busy) return;
     setQ('');
     setBusy(true);
@@ -26,9 +32,14 @@ export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github,
     const r = await ask(text);
     setLog((l) => [...l, r.assessment
       ? { who: 'clerk', text: `Here's my review of ${r.repo?.full_name ?? 'that repo'}:`, reply: r }
-      : { who: 'clerk', text: r.answer }]);
+      : { who: 'clerk', text: r.answer, github: r.github ?? [], slugs: r.slugs }]);
     setBusy(false);
   }
+  const go = (e: React.FormEvent) => { e.preventDefault(); void send(q.trim()); };
+  const lastAuto = useRef(0);
+  useEffect(() => {
+    if (autoAsk && autoAsk.n !== lastAuto.current) { lastAuto.current = autoAsk.n; void send(autoAsk.q); }
+  }, [autoAsk]);
 
   async function goScan(e: React.FormEvent) {
     e.preventDefault();
@@ -37,8 +48,9 @@ export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github,
     setBusy(true);
     setLog((l) => [...l, { who: 'you', text: `Scan my GitHub: ${text}` }]);
     const a = await scan(text);
-    setLog((l) => [...l, { who: 'clerk', text: a }]);
+    setLog((l) => [...l, { who: 'clerk', text: a.text }]);
     setBusy(false);
+    if (a.radar) onRadar(a.radar);
   }
 
   return (
@@ -49,10 +61,22 @@ export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github,
         {log.map((m, i) => (
           <Fragment key={i}>
             <p className={'msg ' + m.who}>{m.text}</p>
+            {m.github && m.github.length > 0 && (
+              <div className="ghchips">
+                {answerItems({ github: m.github, slugs: m.slugs }, tapes).map((it, k, all) => (
+                  <button key={it.kind === 'github' ? it.full_name : it.id} className="vhs-chip" onClick={() => onBrowse(all, k, 'CLERK PICKS')}
+                    style={{ borderLeftColor: `hsl(${(k * 67) % 360} 60% 50%)` }}>
+                    <span>{(it.kind === 'github' ? it.full_name : it.title).split('/').pop()}</span>
+                    {it.kind === 'github' && it.stars != null && <b>★ {formatStars(it.stars)}</b>}
+                  </button>
+                ))}
+              </div>
+            )}
             {m.reply && <AssessmentCard reply={m.reply} tapes={tapes} onOpen={onOpen} onShelve={onShelve} />}
           </Fragment>
         ))}
         {busy && <p className="msg clerk">...</p>}
+        {hasRadar && <button type="button" className="btn alt" onClick={onViewRadar}>VIEW MY RADAR</button>}
         {chips.length > 0 && (
           <div className="chips">
             {chips.map((t) => <button key={t.id} className="chip" onClick={() => onOpen(t)}>{t.title}</button>)}

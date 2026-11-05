@@ -8,6 +8,11 @@ import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './cle
 import { clearGithub, getGithub, getTabId, getVisitor, presenceKey, setGithub } from './visitor';
 import { createSendGate } from '../store/movement';
 import { clerkDestination, roomForAisle } from '../store/rooms';
+import { radarItems, radarTitle, type ClerkAnswer, type ProfileReply } from './radar';
+import type { BrowseItem } from '../ui/releasesNav';
+
+/** A finished profile scan: the clerk's line, and the radar for the releases browser (when the scan found picks). */
+export interface ScanResult { text: string; radar: { title: string; items: BrowseItem[]; why: Record<string, string> } | null }
 import { acceptMove, rememberPos } from '../store/remote';
 import { backoffMs, createTrackGate, handleChannelStatus, visitorsFromPresence, type PresencePayload } from '../store/presence';
 import { joinPicks, latestPicks, type PickRow } from '../store/monthly';
@@ -307,7 +312,7 @@ export function useStore() {
   );
 
   const askClerk = useCallback(
-    async (q: string): Promise<ClerkReply> => {
+    async (q: string): Promise<ClerkAnswer> => {
       const onBreak = (answer = 'The clerk is on break.'): ClerkReply => ({ answer, slugs: [], aisle: 'counter' });
       try {
         const r = await fetch(`${API}/clerk`, {
@@ -329,7 +334,7 @@ export function useStore() {
         setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
         const valid = ['new', 'community', 'counter', 'entrance', ...GENRES];
         if (valid.includes(j.aisle)) goToAisle(j.aisle as Aisle, tapesRef.current.filter((t) => slugs.includes(t.slug)));
-        return { ...j, answer: j.answer ?? '', slugs: j.slugs ?? [], aisle: j.aisle ?? 'counter' } as ClerkReply;
+        return { ...j, answer: j.answer ?? '', slugs: j.slugs ?? [], aisle: j.aisle ?? 'counter', github: Array.isArray(j.github) ? j.github : [] } as ClerkAnswer;
       } catch {
         return onBreak();
       }
@@ -338,7 +343,7 @@ export function useStore() {
   );
 
   const scanProfile = useCallback(
-    async (github: string): Promise<string> => {
+    async (github: string): Promise<ScanResult> => {
       try {
         const r = await fetch(`${API}/profile`, {
           method: 'POST',
@@ -346,20 +351,24 @@ export function useStore() {
           body: JSON.stringify({ github, visitorId: meRef.current.id }),
         });
         const j = await r.json().catch(() => ({}));
-        if (!r.ok) return j.error || 'The clerk is on break.';
+        if (!r.ok) return { text: j.error || 'The clerk is on break.', radar: null };
         if (j.kind === 'user' && typeof j.name === 'string' && j.name) {
           setGithub(j.name);
           setGithubState(j.name);
         }
-        const picks: { slug: string; why: string }[] = j.picks ?? [];
-        const slugs = picks.map((p) => p.slug);
+        const reply = j as ProfileReply;
+        const radar = radarItems(reply, tapesRef.current);
+        const slugs: string[] = Array.isArray(j.slugs) ? j.slugs : [];
         setHighlighted(new Set(tapesRef.current.filter((t) => slugs.includes(t.slug)).map((t) => t.id)));
         const valid = ['new', 'community', 'counter', 'entrance', ...GENRES];
         if (valid.includes(j.aisle)) goToAisle(j.aisle as Aisle, tapesRef.current.filter((t) => slugs.includes(t.slug)));
-        const title = (slug: string) => tapesRef.current.find((t) => t.slug === slug)?.title ?? slug;
-        return [`RADAR FOR ${String(j.name ?? github).toUpperCase()}: ${j.answer ?? ''}`, ...picks.map((p) => `★ ${title(p.slug)} — ${p.why}`)].join('\n');
+        const who = reply.kind === 'user' ? '@' + String(reply.name ?? github) : String(reply.name ?? github);
+        return {
+          text: `RADAR FOR ${who.toUpperCase()}: ${j.answer ?? ''}`,
+          radar: radar.items.length ? { title: radarTitle({ kind: reply.kind, name: String(reply.name ?? github) }), ...radar } : null,
+        };
       } catch {
-        return 'The clerk is on break.';
+        return { text: 'The clerk is on break.', radar: null };
       }
     },
     [goToAisle],

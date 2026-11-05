@@ -141,3 +141,8 @@ textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; r
 .vhs-cover .blurb{flex:1}
 @media (max-width:860px){.vhs-spine.far{display:none}.vhs-spine{width:36px}}
 @media (max-width:560px){.spines{display:none}}
+.vhs-cover .why{font-size:8px;line-height:1.6;margin:0;background:#0b2a6f;color:#fff6d5;padding:6px;border:3px solid #0a0a14}
+.ghchips{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 6px}
+.vhs-chip{font:inherit;font-size:7px;background:#fff6d5;color:#0a0a14;border:2px solid #0a0a14;border-left:8px solid #ffd200;padding:4px 6px;cursor:pointer;display:flex;gap:6px;align-items:center;max-width:100%}
+.vhs-chip b{color:#0b2a6f}
+.vhs-chip:hover{background:#ffd200}

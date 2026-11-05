@@ -14,13 +14,18 @@ const PER_SIDE = 3; // the outermost one hides on narrow screens (CSS)
  * Full-screen browser over any list of items: a store tape (RENT / VOTE) or a light GitHub repo
  * (clone / open). Wraps around at both ends. Left/Right scroll, Esc closes.
  */
-export default function ReleasesBrowser({ items, startIndex = 0, title, onClose, onRent, onVote }: {
+export default function ReleasesBrowser({ items, startIndex = 0, title, why, onClose, onRent, onVote, onAssess, onShelve }: {
   items: BrowseItem[];
   startIndex?: number;
   title: string;
   onClose(): void;
   onRent(t: Tape): void;
   onVote(t: Tape): void;
+  /** A "why this is for you" line per item key (itemKey), shown on the cover. */
+  why?: Record<string, string>;
+  /** GitHub items only: send the repo URL to the clerk / prefill the submit form. */
+  onAssess?(g: GithubItem): void;
+  onShelve?(g: GithubItem): void;
 }) {
   const [i, setI] = useState(Math.min(Math.max(0, startIndex), Math.max(0, items.length - 1)));
   const go = (d: number) => setI((x) => stepIndex(x, items.length, d));
@@ -57,7 +62,7 @@ export default function ReleasesBrowser({ items, startIndex = 0, title, onClose,
         <div className="browser-row">
           <button className="btn alt arrow" onClick={() => go(-1)} aria-label="previous">◀</button>
           <div className="spines left">{left.map((idx, k) => spine(idx, k === 0 && left.length === PER_SIDE))}</div>
-          <Cover item={cur} onRent={onRent} onVote={onVote} />
+          <Cover item={cur} why={why?.[itemKey(cur)] || (isGithubItem(cur) ? cur.why : '')} onRent={onRent} onVote={onVote} onAssess={onAssess} onShelve={onShelve} />
           <div className="spines right">{right.map((idx, k) => spine(idx, k === right.length - 1 && right.length === PER_SIDE))}</div>
           <button className="btn alt arrow" onClick={() => go(1)} aria-label="next">▶</button>
         </div>
@@ -66,7 +71,9 @@ export default function ReleasesBrowser({ items, startIndex = 0, title, onClose,
   );
 }
 
-function Cover({ item, onRent, onVote }: { item: BrowseItem; onRent(t: Tape): void; onVote(t: Tape): void }) {
+function Cover({ item, why, onRent, onVote, onAssess, onShelve }: {
+  item: BrowseItem; why: string; onRent(t: Tape): void; onVote(t: Tape): void; onAssess?(g: GithubItem): void; onShelve?(g: GithubItem): void;
+}) {
   const st = itemStars(item);
   return (
     <div className="vhs-cover">
@@ -80,14 +87,14 @@ function Cover({ item, onRent, onVote }: { item: BrowseItem; onRent(t: Tape): vo
         {item.language && <span>{item.language}</span>}
         {isGithubItem(item) && item.license && <span>{item.license}</span>}
       </div>
-      <p className="blurb">{isGithubItem(item) ? item.description ?? item.why : item.blurb}</p>
-      {isGithubItem(item) && item.description && <p className="small">{item.why}</p>}
-      {isGithubItem(item) ? <GithubActions item={item} /> : <TapeActions tape={item} onRent={() => onRent(item)} onVote={() => onVote(item)} />}
+      <p className="blurb">{isGithubItem(item) ? item.description ?? '' : item.blurb}</p>
+      {why && <p className="why"><b>WHY FOR YOU:</b> {why}</p>}
+      {isGithubItem(item) ? <GithubActions item={item} onAssess={onAssess} onShelve={onShelve} /> : <TapeActions tape={item} onRent={() => onRent(item)} onVote={() => onVote(item)} />}
     </div>
   );
 }
 
-function GithubActions({ item }: { item: GithubItem }) {
+function GithubActions({ item, onAssess, onShelve }: { item: GithubItem; onAssess?(g: GithubItem): void; onShelve?(g: GithubItem): void }) {
   const [copied, setCopied] = useState(false);
   const clone = () => {
     navigator.clipboard?.writeText(`git clone ${item.html_url}.git`).then(() => setCopied(true), () => {});
@@ -96,6 +103,8 @@ function GithubActions({ item }: { item: GithubItem }) {
     <div className="row">
       <button className="btn" onClick={clone}>{copied ? 'COPIED' : 'COPY CLONE'}</button>
       <a className="btn alt" href={item.html_url} target="_blank" rel="noreferrer noopener">OPEN ON GITHUB</a>
+      {onAssess && <button className="btn alt" onClick={() => onAssess(item)}>ASSESS IT</button>}
+      {onShelve && <button className="btn alt" onClick={() => onShelve(item)}>PUT ON COMMUNITY SHELF</button>}
     </div>
   );
 }
