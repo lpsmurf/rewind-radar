@@ -34,12 +34,16 @@ export function stepIndex(index: number, len: number, delta: number): number {
 /** Indexes of the neighbours drawn each side of `index`: left far-to-near, right near-to-far. Wraps; no repeats on short lists. */
 export function neighbourWindow(len: number, index: number, per: number): { left: number[]; right: number[] } {
   const others = Math.max(0, len - 1);
-  const l = Math.min(per, Math.ceil(others / 2));
+  const l = Math.min(per, Math.floor(others / 2)); // an odd one out goes to the right
   const r = Math.min(per, others - l);
   const left = Array.from({ length: l }, (_, k) => stepIndex(index, len, -(l - k)));
   const right = Array.from({ length: r }, (_, k) => stepIndex(index, len, k + 1));
   return { left, right };
 }
+
+/** True when the event came from a text field: shortcuts must leave typing alone. */
+export const isTypingTarget = (t: EventTarget | null): boolean =>
+  !!(t as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable]');
 
 export const positionLabel = (index: number, len: number): string => `${len ? index + 1 : 0} / ${len}`;
 

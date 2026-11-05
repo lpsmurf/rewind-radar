@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { formatStars, ratingLabel, starsLabel } from '../src/lib/stars.ts';
-import { GLYPHS, STAR, ellipsize, textWidth } from '../src/store/pixelText.ts';
+import { GLYPHS, STAR, ellipsize, textWidth, wallStarLabel } from '../src/store/pixelText.ts';
 
 describe('formatStars', () => {
   it('999 stays 999, thousands get one decimal, millions too', () => {
@@ -68,5 +68,18 @@ describe('ratingLabel (the clerk rating, kept apart from GitHub stars)', () => {
     expect(ratingLabel(3.6)).toBe('RATING 4/5');
     expect(ratingLabel(null)).toBeNull();
     expect(ratingLabel(4)).not.toContain('★');
+  });
+});
+
+describe('wallStarLabel (always keeps the sprite; drops the decimal only when it cannot fit)', () => {
+  it('uses the shared formatter, uppercased, when it fits', () => {
+    expect(wallStarLabel(12400, 23)).toBe('12.4K');
+    expect(wallStarLabel(640, 23)).toBe('640');
+    expect(wallStarLabel(1200000, 23)).toBe('1.2M');
+  });
+  it('rounds to whole thousands when the long form is too wide', () => {
+    expect(wallStarLabel(999900, 23)).toBe('1M');
+    expect(wallStarLabel(12400, 18)).toBe('12K');
+    expect(wallStarLabel(345678, 17)).toBe('346K');
   });
 });

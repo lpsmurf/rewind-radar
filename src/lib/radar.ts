@@ -66,9 +66,14 @@ export function radarItems(r: ProfileReply, tapes: Tape[]): { items: BrowseItem[
 /** A clerk answer's GitHub picks first, then the store tapes it named. */
 export function answerItems(r: { github?: RepoHit[]; slugs?: string[] }, tapes: Tape[]): BrowseItem[] {
   const bySlug = new Map(tapes.map((t) => [t.slug, t]));
-  const store = (r.slugs ?? []).flatMap((s) => { const t = bySlug.get(s); return t ? [t] : []; });
+  const known = (r.slugs ?? []).flatMap((s) => { const t = bySlug.get(s); return t ? [t] : []; });
+  const isSkill = (t: Tape) => t.kind !== 'repo' && t.kind !== 'community';
+  const store = [...known.filter((t) => !isSkill(t)), ...known.filter(isSkill)]; // repos, then skills: the browser's order
   return [...(r.github ?? []).map((h) => hitToItem(h)), ...store];
 }
 
 export const radarTitle = (r: { kind: string; name: string }): string =>
   r.kind === 'user' ? `YOUR RADAR · @${r.name}` : `RADAR · ${r.name}`;
+
+/** What Scan my GitHub looks up: the typed text, else the connected login. */
+export const scanTarget = (typed: string, connected: string | null): string => typed.trim() || connected || '';

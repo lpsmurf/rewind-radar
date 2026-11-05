@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { answerItems, hitToItem, radarItems, radarTitle, type ProfileReply, type RepoHit } from '../src/lib/radar.ts';
+import { answerItems, scanTarget, hitToItem, radarItems, radarTitle, type ProfileReply, type RepoHit } from '../src/lib/radar.ts';
 import { itemKey } from '../src/ui/releasesNav.ts';
 import { tapeFixture } from './helpers/tapes.ts';
 
@@ -66,5 +66,20 @@ describe('radarTitle', () => {
   it('names a user with @ and a repo without', () => {
     expect(radarTitle({ kind: 'user', name: 'ann' })).toBe('YOUR RADAR · @ann');
     expect(radarTitle({ kind: 'repo', name: 'o/r' })).toBe('RADAR · o/r');
+  });
+});
+
+describe('answerItems order matches the browser: repos first, skills last', () => {
+  it('puts store repos before skills even when the server listed a skill first', () => {
+    const items = answerItems({ github: [hit('o/one')], slugs: ['skill-a', 'repo-c', 'skill-b'] }, tapes);
+    expect(items.map(itemKey)).toEqual(['gh:o/one', 'c', 'a', 'b']);
+  });
+});
+
+describe('scanTarget', () => {
+  it('uses the typed text, else the connected login, else nothing', () => {
+    expect(scanTarget(' ann ', 'bob')).toBe('ann');
+    expect(scanTarget('  ', 'bob')).toBe('bob');
+    expect(scanTarget('', null)).toBe('');
   });
 });

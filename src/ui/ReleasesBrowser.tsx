@@ -3,7 +3,7 @@ import { RING_COLORS } from '../types';
 import { formatStars } from '../lib/stars';
 import { TapeActions } from './TapePanel';
 import {
-  isGithubItem, itemKey, itemStars, itemTitle, neighbourWindow, positionLabel, shortTitle, spineHue, stepIndex,
+  isGithubItem, isTypingTarget, itemKey, itemStars, itemTitle, neighbourWindow, positionLabel, shortTitle, spineHue, stepIndex,
   type BrowseItem, type GithubItem,
 } from './releasesNav';
 import type { Tape } from '../types';
@@ -36,7 +36,7 @@ export default function ReleasesBrowser({ items, startIndex = 0, title, why, onC
       else if (e.key === 'ArrowRight') { e.preventDefault(); go(1); }
     };
     // Capture phase + stopPropagation: the store canvas also walks on the arrow keys.
-    const h = (e: KeyboardEvent) => { if (['Escape', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { e.stopPropagation(); onKey(e); } };
+    const h = (e: KeyboardEvent) => { if (isTypingTarget(e.target)) return; if (['Escape', 'ArrowLeft', 'ArrowRight'].includes(e.key)) { e.stopPropagation(); onKey(e); } };
     window.addEventListener('keydown', h, true);
     return () => window.removeEventListener('keydown', h, true);
   });

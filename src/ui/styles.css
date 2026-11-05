@@ -129,7 +129,9 @@ textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; r
 .browser-title{margin:0 28px 10px 0;font-size:10px;color:#ffd200}
 .browser-row{display:flex;align-items:center;justify-content:center;gap:8px}
 .browser .arrow{flex:none;padding:14px 10px}
-.spines{display:flex;gap:6px;align-items:flex-end;flex:none}
+.spines{display:flex;gap:6px;align-items:flex-end;flex:1 1 0;min-width:0}
+.spines.left{justify-content:flex-end}
+.vhs-spine{flex:none}
 .vhs-spine{width:44px;height:190px;border:3px solid #0a0a14;color:#0a0a14;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:6px 0;font-family:inherit;font-size:7px}
 .vhs-spine:hover{outline:3px solid #fff6d5}
 .vhs-spine .sp-title{writing-mode:vertical-rl;max-height:130px;overflow:hidden;font-size:8px;background:#fff6d5;padding:4px 2px}

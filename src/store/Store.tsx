@@ -10,7 +10,7 @@ import { activeBubble, bubbleLines, type ChatEntry } from './chat';
 import { MONTHLY_PLACEHOLDER } from './monthly';
 import { standTapes, weeklyReleases } from './rooms';
 import { formatStars } from '../lib/stars';
-import { drawPixelText, drawStarCount, drawStarCountAt, ellipsize, starCountWidth, textWidth } from './pixelText';
+import { drawPixelText, drawStarCount, drawStarCountAt, ellipsize, wallStarLabel } from './pixelText';
 import { TV_RECT, WALL_SHELVES, wallSlot, wallSplit, type WallShelf } from './wall';
 
 export interface StoreProps {
@@ -286,9 +286,7 @@ export default function Store(props: StoreProps) {
             g.fillStyle = t.ring ? RING_COLORS[t.ring] : P.cream; g.fillRect(x + 9, y + 15, 3, 3);
             hs.push({ x, y, w: 14, h: 20, t, src });
             if ((t.kind === 'repo' || t.kind === 'community') && t.stars != null) { // repo stars under the box (skills have none)
-              const lab = formatStars(t.stars).toUpperCase();
-              if (starCountWidth(lab) <= sh.pitch - 2) drawStarCount(g, lab, x + 7, labelY);
-              else drawPixelText(g, lab, Math.round(x + 7 - textWidth(lab) / 2), labelY, P.cream);
+              drawStarCount(g, wallStarLabel(t.stars, sh.pitch - 2), x + 7, labelY); // every label keeps the sprite
             }
             if (hl.has(t.id)) { any = true; if (blink) outline(x - 1, y - 1, 16, 22); }
           });
