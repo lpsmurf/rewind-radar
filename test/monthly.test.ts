@@ -12,7 +12,9 @@ const tape = (slug: string, o: Record<string, unknown> = {}) => ({ id: `id-${slu
 function setup(o: { tapes?: any[]; votes?: Record<string, number>; snaps?: { repo: string; at: string; stars: number }[]; writeError?: boolean } = {}) {
   db.current = fakeDb({
     tapes: () => ({ data: o.tapes ?? [], error: null }),
-    tape_votes: () => ({ data: Object.entries(o.votes ?? {}).map(([tape_id, votes]) => ({ tape_id, votes })), error: null }),
+    // one row per vote cast; the view tape_votes (current week only) must not be used, so it is a trap here
+    votes: () => ({ data: Object.entries(o.votes ?? {}).flatMap(([tape_id, n]) => Array.from({ length: n }, () => ({ tape_id }))), error: null }),
+    tape_votes: () => ({ data: [{ tape_id: 'id-gh-ann-tool', votes: 999 }], error: null }),
     star_snapshots: () => ({ data: o.snaps ?? [], error: null }),
     monthly_picks: () => ({ data: null, error: o.writeError ? { message: 'boom' } : null }),
   });
@@ -72,6 +74,28 @@ describe('buildMonthlyPicks', () => {
       { month: '2026-10-01', rank: 2, tape_slug: 'gh-bob-lib', votes: 1, stars_gained: 0, score: 3 },
     ]);
     expect(picksWritten(d)).toEqual(out);
+  });
+  it('counts votes cast within the month from the votes table, not the current-week view', async () => {
+    const d = setup({ tapes: [tape('gh-ann-tool')], votes: { 'id-gh-ann-tool': 3 } });
+    const out = await buildMonthlyPicks('2026-10-01');
+    expect(out[0].votes).toBe(3);
+    expect(d.calls('tape_votes')).toHaveLength(0);
+    const q = d.calls('votes')[0];
+    expect(has(q, 'gte', 'created_at', '2026-10-01T00:00:00.000Z')).toBe(true);
+    expect(has(q, 'lt', 'created_at', '2026-11-01T00:00:00.000Z')).toBe(true);
+    expect(arg(q, 'in', 1)).toEqual(['id-gh-ann-tool']);
+  });
+  it('uses the stocking-time stars as the baseline when the month has fewer than 2 snapshots', async () => {
+    setup({
+      tapes: [tape('gh-ann-tool', { stars: 100 }), tape('gh-bob-lib', { stars: 40 }), tape('gh-cy-none', { stars: 10 })],
+      snaps: [{ repo: 'ann/tool', at: '2026-10-20', stars: 160 }, { repo: 'bob/lib', at: '2026-10-05', stars: 30 }],
+    });
+    const out = await buildMonthlyPicks('2026-10-01');
+    expect(out.map((p) => [p.tape_slug, p.stars_gained])).toEqual([['gh-ann-tool', 60], ['gh-bob-lib', 0], ['gh-cy-none', 0]]); // a loss floors at 0, no snapshot at all gains nothing
+  });
+  it('still uses first-to-last snapshots when there are 2 or more, whatever the stocking stars were', async () => {
+    setup({ tapes: [tape('gh-ann-tool', { stars: 5 })], snaps: [{ repo: 'ann/tool', at: '2026-10-03', stars: 100 }, { repo: 'ann/tool', at: '2026-10-20', stars: 130 }] });
+    expect((await buildMonthlyPicks('2026-10-01'))[0].stars_gained).toBe(30);
   });
   it('never scores a loss of stars below zero', async () => {
     setup({ tapes: [tape('gh-ann-tool')], snaps: [{ repo: 'ann/tool', at: '2026-10-01', stars: 90 }, { repo: 'ann/tool', at: '2026-10-09', stars: 80 }] });

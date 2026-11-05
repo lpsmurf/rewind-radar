@@ -42,17 +42,31 @@ export async function buildMonthlyPicks(month: string): Promise<Pick[]> {
   const next = firstOf(start.getUTCFullYear(), start.getUTCMonth() + 1);
   const { data: tapes, error } = await db
     .from('tapes')
-    .select('id,slug,kind,source_url')
+    .select('id,slug,kind,source_url,stars')
     .in('kind', ['repo', 'community'])
     .or(`month.eq.${month},and(month.is.null,created_at.gte.${month},created_at.lt.${next})`);
   if (error) throw new Error(`monthly tapes read failed: ${error.message}`);
-  const list = (tapes ?? []) as { id: string; slug: string; source_url: string | null }[];
+  const list = (tapes ?? []) as { id: string; slug: string; source_url: string | null; stars: number | null }[];
 
   let picks: Pick[] = [];
   if (list.length) {
-    const { data: vrows, error: ve } = await db.from('tape_votes').select('tape_id,votes').in('tape_id', list.map((t) => t.id));
-    if (ve) throw new Error(`monthly votes read failed: ${ve.message}`);
-    const votes = new Map<string, number>(((vrows ?? []) as { tape_id: string; votes: number }[]).map((r) => [r.tape_id, Number(r.votes)]));
+    // Votes cast within the month, counted from the votes table. (The tape_votes view only counts the current week.)
+    // PostgREST returns at most 1000 rows a call, so read in pages.
+    const ids = list.map((t) => t.id);
+    const votes = new Map<string, number>();
+    for (let from = 0; ; from += 1000) {
+      const { data: vrows, error: ve } = await db
+        .from('votes')
+        .select('tape_id')
+        .in('tape_id', ids)
+        .gte('created_at', start.toISOString())
+        .lt('created_at', new Date(`${next}T00:00:00Z`).toISOString())
+        .order('created_at', { ascending: true })
+        .range(from, from + 999);
+      if (ve) throw new Error(`monthly votes read failed: ${ve.message}`);
+      for (const r of (vrows ?? []) as { tape_id: string }[]) votes.set(r.tape_id, (votes.get(r.tape_id) ?? 0) + 1);
+      if ((vrows ?? []).length < 1000) break;
+    }
 
     const repos = [...new Set(list.map((t) => repoOf(t.source_url)).filter((r): r is string => !!r))];
     const { data: srows, error: se } = await db.from('star_snapshots').select('repo,at,stars').in('repo', repos).gte('at', month).lt('at', next).order('at', { ascending: true });
@@ -69,7 +83,9 @@ export async function buildMonthlyPicks(month: string): Promise<Pick[]> {
     picks = scorePicks(
       list.map((t) => {
         const s = span.get(repoOf(t.source_url) ?? '');
-        return { slug: t.slug, votes: votes.get(t.id) ?? 0, stars_gained: s ? Math.max(0, s.last.stars - s.first.stars) : 0 };
+        // two or more snapshots in the month: first to last. Only one: the stars at stocking time are the baseline.
+        const base = s && s.first.at !== s.last.at ? s.first.stars : t.stars;
+        return { slug: t.slug, votes: votes.get(t.id) ?? 0, stars_gained: s && base != null ? Math.max(0, s.last.stars - base) : 0 };
       }),
       month,
     );
