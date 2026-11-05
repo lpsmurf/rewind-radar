@@ -8,7 +8,7 @@ vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } 
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 
 import { budgetLeft, BudgetError, getAssessment, PROMPT_VERSION, RateLimitError } from '../lib/assess.ts';
-import { parseRepoRef } from '../lib/github.ts';
+import { parseRepoRef, repoExists } from '../lib/github.ts';
 import { SONNET } from '../lib/ai.ts';
 import { SAMPLE } from './helpers/samples.ts';
 
@@ -17,11 +17,12 @@ const allow = { allowMiss: () => true };
 const CANDS = [{ slug: 'diagram-design', title: 'Diagram Design', genre: 'Design', blurb: 'b', kind: 'skill', match: true }];
 
 type Usage = { at: string; cost_usd: number };
-function setup(row: Record<string, unknown> | null, spent = 0, usage: Usage[] | 'error' = []) {
+function setup(row: Record<string, unknown> | null, spent = 0, usage: Usage[] | 'error' = [], tape: { slug: string } | null = null) {
   db.current = fakeDb({
     assessments: (q: Query) => (has(q, 'select') && !has(q, 'upsert') ? { data: row, error: null } : { data: null, error: null }),
     'rpc:search_tapes': () => ({ data: CANDS, error: null }),
     'rpc:ai_spend_today': () => ({ data: spent, error: null }),
+    tapes: () => ({ data: tape, error: null }),
     ai_usage: (q: Query) =>
       has(q, 'select') ? (usage === 'error' ? { data: null, error: { message: 'boom' } } : { data: usage, error: null }) : { data: null, error: null },
   });
@@ -205,5 +206,53 @@ describe('fail-closed on the Sonnet paths', () => {
     expect(err).not.toBeInstanceOf(RateLimitError);
     expect(err).not.toBeInstanceOf(BudgetError);
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe('bare owner/repo guesses', () => {
+  const bare = parseRepoRef('tcp/ip')!;
+  const bareP = parseRepoRef('gitroomhq/postiz-app')!;
+
+  it('returns null for a repo that does not exist, before touching quota, budget or Sonnet', async () => {
+    stubGitHub({});
+    const allowMiss = vi.fn(() => true);
+    const d = setup(null);
+    expect(await getAssessment(bare, { allowMiss })).toBeNull();
+    expect(allowMiss).not.toHaveBeenCalled();
+    expect(d.calls('rpc:ai_spend_today')).toHaveLength(0);
+    expect(d.calls('ai_usage')).toHaveLength(0);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('assesses a bare ref once GitHub confirms the repo exists', async () => {
+    stubGitHub(POSTIZ);
+    setup(null);
+    expect(bareP.bare).toBe(true);
+    expect(await getAssessment(bareP, allow)).toMatchObject({ cached: false });
+  });
+
+  it('skips the existence check when the repo is already a tape', async () => {
+    const seen = stubGitHub(POSTIZ);
+    const d = setup(null, 0, [], { slug: 'gh-gitroomhq-postiz-app' });
+    expect(await getAssessment(bareP, allow)).toMatchObject({ cached: false });
+    expect(seen.filter((s) => s.url === 'https://api.github.com/repos/gitroomhq/postiz-app')).toHaveLength(1); // facts only
+    const q = d.calls('tapes')[0];
+    expect(has(q, 'in', 'slug', ['gh-gitroomhq-postiz-app', 'c-gitroomhq-postiz-app'])).toBe(true);
+  });
+
+  it('does not run the existence check for an explicit URL or when a row is cached', async () => {
+    const seen = stubGitHub({});
+    setup(row());
+    await getAssessment(bareP, allow);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('repoExists: 404 is false, 200 true, anything else throws', async () => {
+    stubGitHub({});
+    expect(await repoExists(bare)).toBe(false);
+    stubGitHub(POSTIZ);
+    expect(await repoExists(bareP)).toBe(true);
+    stubGitHub({ '/repos/gitroomhq/postiz-app': 403 });
+    await expect(repoExists(bareP)).rejects.toMatchObject({ status: 403 });
   });
 });

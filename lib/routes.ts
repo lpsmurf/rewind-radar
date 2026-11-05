@@ -100,11 +100,15 @@ export async function handle(req: Request): Promise<Response> {
         if (!q.ref.bare) return json({ error: CLERK_LINES.noRepo }, 404);
         // a bare "owner/repo" GitHub does not know was probably just a question: fall through
       } catch (e) {
-        if (e instanceof RateLimitError) return json({ error: CLERK_LINES.rateLimit }, 429);
-        if (e instanceof BudgetError) return json({ answer: CLERK_LINES.budget, ...plain });
-        if (e instanceof GitHubError) return json({ error: 'GitHub is rate-limiting the clerk. Try again in a few minutes.' }, 503);
-        console.error('[clerk:assess]', e);
-        return json({ error: 'The clerk is on break.' }, 500);
+        // a bare "owner/repo" is only a guess: whatever went wrong, answer it as a normal question
+        if (!q.ref.bare) {
+          if (e instanceof RateLimitError) return json({ error: CLERK_LINES.rateLimit }, 429);
+          if (e instanceof BudgetError) return json({ answer: CLERK_LINES.budget, ...plain });
+          if (e instanceof GitHubError) return json({ error: 'GitHub is rate-limiting the clerk. Try again in a few minutes.' }, 503);
+          console.error('[clerk:assess]', e);
+          return json({ error: 'The clerk is on break.' }, 500);
+        }
+        console.warn('[clerk:assess] bare ref fell through', e);
       }
     }
 

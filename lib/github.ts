@@ -156,6 +156,14 @@ async function topLevel(full: string): Promise<string[]> {
   }
 }
 
+/** Cheap existence check (one GitHub read). false = 404; throws GitHubError when GitHub refuses (e.g. rate limit). */
+export async function repoExists(ref: RepoRef): Promise<boolean> {
+  const r = await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`, { headers: headers() });
+  if (r.status === 404) return false;
+  if (!r.ok) throw new GitHubError(r.status);
+  return true;
+}
+
 /** Facts the assessment is built on. null = no such repo; throws GitHubError when GitHub refuses (e.g. rate limit). */
 export async function fetchRepoFacts(ref: RepoRef): Promise<RepoFacts | null> {
   const path = `${ref.owner}/${ref.repo}`;

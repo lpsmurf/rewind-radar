@@ -166,8 +166,9 @@ describe('POST /clerk: pasted repos', () => {
     setup();
     create.mockResolvedValue(jsonReply(SAMPLE));
     const ip = '9.9.9.9';
-    for (let i = 0; i < 5; i++) expect((await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip)).status).toBe(200);
-    const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip);
+    const question = 'https://github.com/gitroomhq/postiz-app'; // a bare owner/repo never gets a 429 any more
+    for (let i = 0; i < 5; i++) expect((await post('clerk', { question, visitorId: vid() }, ip)).status).toBe(200);
+    const r = await post('clerk', { question, visitorId: vid() }, ip);
     expect(r.status).toBe(429);
     expect(r.body.error).toBe(CLERK_LINES.rateLimit);
   });
@@ -313,5 +314,64 @@ describe('rate limits key on the client IP, not the body', () => {
     const bare = () => handle(new Request('http://localhost/api/clerk', { method: 'POST', body: JSON.stringify({ question: 'a skill for diagrams', visitorId: vid() }) }));
     for (let i = 0; i < 15; i++) expect((await bare()).status).toBe(200);
     expect((await bare()).status).toBe(429);
+  });
+});
+
+describe('bare owner/repo never produces an error response', () => {
+  const askOk = () => create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Try these.', slugs: [], aisle: 'counter' }));
+
+  it('"tcp/ip" with GitHub 404 never reaches the budget or Sonnet and gets an ask-path answer', async () => {
+    stubGitHub({});
+    const d = setup();
+    askOk();
+    const r = await post('clerk', { question: 'tcp/ip', visitorId: vid() });
+    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+    expect(d.calls('rpc:ai_spend_today')).toHaveLength(1); // the ask path's own check only
+    expect(d.calls('ai_usage').filter((q: Query) => has(q, 'select'))).toHaveLength(0);
+    expect(create).toHaveBeenCalledOnce();
+    expect(create.mock.calls[0][0].model).toBe(HAIKU);
+  });
+
+  it('a rate-limited bare ref gets an ask-path answer, not a 429', async () => {
+    stubGitHub(POSTIZ);
+    setup();
+    create.mockResolvedValue(jsonReply(SAMPLE));
+    const ip = '5.5.5.5';
+    for (let i = 0; i < 5; i++) await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip);
+    askOk();
+    const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() }, ip);
+    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+  });
+
+  it('an over-budget bare ref gets the free-mode answer, not the budget line', async () => {
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
+    stubGitHub(POSTIZ);
+    setup({ spent: 3 });
+    const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() });
+    expect(r.status).toBe(200);
+    expect(r.body.answer).not.toBe(CLERK_LINES.budget);
+    expect(r.body.answer).toBe(CLERK_LINES.free);
+  });
+
+  it('a GitHub failure on a bare ref falls through to the ask path', async () => {
+    stubGitHub({ '/repos/gitroomhq/postiz-app': 403 });
+    setup();
+    askOk();
+    const r = await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() });
+    expect(r).toEqual({ status: 200, body: { answer: 'Try these.', slugs: [], aisle: 'counter' } });
+  });
+
+  it('an unreadable assessments table on a bare ref also falls through', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup();
+    d.on('assessments', () => ({ data: null, error: { message: 'boom' } }));
+    askOk();
+    expect((await post('clerk', { question: 'gitroomhq/postiz-app', visitorId: vid() })).status).toBe(200);
+  });
+
+  it('explicit URLs keep their error responses', async () => {
+    stubGitHub({ '/repos/gitroomhq/postiz-app': 403 });
+    setup();
+    expect((await post('clerk', { question: 'https://github.com/gitroomhq/postiz-app', visitorId: vid() })).status).toBe(503);
   });
 });

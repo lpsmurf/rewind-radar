@@ -2,7 +2,7 @@ import { admin } from './admin.ts';
 import { assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, type OnUsage } from './ai.ts';
 import { candidates } from './catalog.ts';
 import { env } from './env.ts';
-import { fetchProfile, fetchRepoFacts, type RepoFacts, type RepoRef } from './github.ts';
+import { fetchProfile, fetchRepoFacts, repoExists, type RepoFacts, type RepoRef } from './github.ts';
 import type { Assessment, Fit, GateKey, HealthSignals, Ring, RepoSummary } from '../src/types.ts';
 
 export { sanitizeUntrusted }; // lives in ai.ts (assess.ts imports ai.ts, not the other way round)
@@ -183,6 +183,17 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
   if (row && row.prompt_version === PROMPT_VERSION && Date.now() - Date.parse(row.updated_at) < ASSESS_TTL_DAYS * 864e5) {
     await admin().from('assessments').update({ hits: (row.hits ?? 0) + 1 }).eq('repo', key);
     return fromRow(row);
+  }
+
+  // A bare "owner/repo" is only a guess ("tcp/ip"): make sure it is real before it costs any quota or budget.
+  if (ref.bare && !row) {
+    const { data: tape, error: tapeErr } = await admin()
+      .from('tapes')
+      .select('slug')
+      .in('slug', [`gh-${key.replace('/', '-')}`, `c-${key.replace('/', '-')}`])
+      .limit(1)
+      .maybeSingle();
+    if (!tapeErr && !tape && !(await repoExists(ref))) return null;
   }
 
   if (!o.allowMiss()) throw new RateLimitError();
