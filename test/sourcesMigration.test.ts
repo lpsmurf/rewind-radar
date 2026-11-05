@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const sql = readFileSync(new URL('../supabase/migrations/005_sources.sql', import.meta.url), 'utf8');
-const TABLES = ['ingest_queue', 'source_config', 'source_runs', 'star_snapshots', 'monthly_picks', 'assess_batches'];
+const TABLES = ['ingest_queue', 'source_config', 'source_runs', 'star_snapshots', 'monthly_picks', 'assess_batches', 'admin_failures'];
 
 describe('005_sources.sql', () => {
   it('creates every Phase 3 table idempotently, with RLS on, a comment, and nothing for public', () => {

@@ -84,6 +84,15 @@ create table if not exists public.assess_batches (
 );
 comment on table public.assess_batches is 'Message Batches submitted to pre-assess new repos; collected_at is set once results are cached. Server-only.';
 
+-- Wrong admin tokens, counted in the database so the lockout holds across Edge instances: 20 in an hour (from any IP)
+-- locks every admin route for 15 minutes. A deliberate global lockout; acceptable for a single-owner admin.
+create table if not exists public.admin_failures (
+  at timestamptz not null default now(),
+  ip text
+);
+create index if not exists admin_failures_at_idx on public.admin_failures (at desc);
+comment on table public.admin_failures is 'Wrong ADMIN_TOKEN attempts, for the global admin lockout. Server-only.';
+
 -- Row level security everywhere; only monthly_picks may be read by visitors.
 alter table public.ingest_queue   enable row level security;
 alter table public.source_config  enable row level security;
@@ -91,12 +100,14 @@ alter table public.source_runs    enable row level security;
 alter table public.star_snapshots enable row level security;
 alter table public.monthly_picks  enable row level security;
 alter table public.assess_batches enable row level security;
+alter table public.admin_failures enable row level security;
 revoke all on public.ingest_queue   from public, anon, authenticated;
 revoke all on public.source_config  from public, anon, authenticated;
 revoke all on public.source_runs    from public, anon, authenticated;
 revoke all on public.star_snapshots from public, anon, authenticated;
 revoke all on public.monthly_picks  from public, anon, authenticated;
 revoke all on public.assess_batches from public, anon, authenticated;
+revoke all on public.admin_failures from public, anon, authenticated;
 drop policy if exists "monthly picks are public" on public.monthly_picks;
 create policy "monthly picks are public" on public.monthly_picks for select using (true);
 grant select on public.monthly_picks to anon, authenticated;

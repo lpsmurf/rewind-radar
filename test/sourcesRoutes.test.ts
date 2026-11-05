@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { toolReply } from './helpers/anthropic.ts';
 import { POSTIZ, stubGitHub } from './helpers/github.ts';
@@ -14,7 +15,7 @@ import { handle } from '../lib/routes.ts';
 let ips = 0;
 const call = async (method: string, path: string, o: { body?: unknown; token?: string | null; ip?: string; headers?: Record<string, string> } = {}) => {
   const headers: Record<string, string> = { 'content-type': 'application/json', 'x-forwarded-for': o.ip ?? `10.9.0.${++ips}`, ...o.headers };
-  if (o.token !== null) headers['x-admin-token'] = o.token ?? 'open-sesame';
+  if (o.token !== null) headers['x-admin-token'] = o.token ?? 'open-sesame-open-sesame-open-sesame';
   const r = await handle(new Request('http://localhost/api/' + path, { method, headers, body: method === 'POST' || method === 'PUT' ? JSON.stringify(o.body ?? {}) : undefined }));
   return { status: r.status, body: (await r.json()) as any };
 };
@@ -44,6 +45,7 @@ function setup(o: { row?: any; spent?: number; tapeInsert?: { code?: string }; t
       return { data: [ROW], error: null };
     },
     tapes: (q: Query) => (has(q, 'upsert') ? { data: { id: 'tape-1' }, error: null } : has(q, 'select') && !has(q, 'insert') && o.tapes ? { data: o.tapes, error: null } : has(q, 'insert') ? (o.tapeInsert ? { data: null, error: { code: o.tapeInsert.code, message: 'x' } } : { data: { id: 'tape-1' }, error: null }) : { data: [], error: null }),
+    admin_failures: (q: Query) => ({ data: has(q, 'select') ? [] : null, error: null }),
     source_runs: (q: Query) => (has(q, 'insert') ? { data: null, error: null } : { data: [{ id: 1, source: 'web', found: 2, queued: 1, cost_usd: 0.01, error: null, at: '2026-11-04T09:00:00Z' }], error: null }),
   });
   return db.current;
@@ -54,7 +56,7 @@ beforeEach(() => {
   create.mockResolvedValue(null);
   reg.sources.length = 0;
   batch.collect.mockReset().mockResolvedValue({ batches: 0, cached: 0, skipped: 0 });
-  vi.stubEnv('ADMIN_TOKEN', 'open-sesame');
+  vi.stubEnv('ADMIN_TOKEN', 'open-sesame-open-sesame-open-sesame');
   vi.stubEnv('CRON_SECRET', 's3cret');
 });
 
@@ -64,7 +66,7 @@ describe('admin auth (every /admin route)', () => {
     const d = setup();
     expect((await call(m, p, { token: 'nope' })).status).toBe(403);
     expect((await call(m, p, { token: null })).status).toBe(403);
-    expect(d.queries).toHaveLength(0);
+    expect(d.queries.filter((q: Query) => q.table !== 'admin_failures')).toHaveLength(0); // only the failure counter is touched
     expect(create).not.toHaveBeenCalled();
   });
   it.each(routes)('%s %s is always forbidden when ADMIN_TOKEN is unset', async (m, p) => {
@@ -78,6 +80,67 @@ describe('admin auth (every /admin route)', () => {
     for (let i = 0; i < 60; i++) expect((await call('GET', 'admin/runs', { token: 'wrong', ip: '10.8.0.1' })).status).toBe(403);
     expect((await call('GET', 'admin/runs', { ip: '10.8.0.1' })).status).toBe(429);
     expect((await call('GET', 'admin/runs', { ip: '10.8.0.2' })).status).toBe(200);
+  });
+});
+
+describe('admin hardening', () => {
+  afterEach(() => vi.useRealTimers());
+  const failureLog = () => {
+    const rows: { at: string; ip: string }[] = [];
+    const d = setup();
+    d.on('admin_failures', (q: Query) => {
+      if (has(q, 'insert')) { rows.push({ at: new Date().toISOString(), ...arg(q, 'insert') }); return { data: null, error: null }; }
+      const since = (q.calls.find((c) => c[0] === 'gt') as any)?.[2] ?? '';
+      return { data: rows.filter((r) => r.at > since).reverse().slice(0, 20), error: null };
+    });
+    return { d, rows };
+  };
+  const fail = async (n: number) => { for (let i = 0; i < n; i++) await call('GET', 'admin/runs', { token: 'wrong', ip: `10.5.${n}.${i}` }); };
+
+  it('compares the cron secret on radar/refresh with sameSecret, not ===', () => {
+    const src = readFileSync(new URL('../lib/routes.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/const forced = [^\n]*sameSecret\(/);
+    expect(src).not.toMatch(/x-cron-secret'\) === /);
+  });
+  it('treats an ADMIN_TOKEN shorter than 32 characters as unset (403 even for the right token) and logs once', async () => {
+    vi.stubEnv('ADMIN_TOKEN', 'too-short-9-xyz');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const d = setup();
+    expect((await call('GET', 'admin/runs', { token: 'too-short-9-xyz' })).status).toBe(403);
+    expect((await call('GET', 'admin/runs', { token: 'too-short-9-xyz' })).status).toBe(403);
+    expect(d.calls('source_runs')).toHaveLength(0);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/ADMIN_TOKEN/);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('too-short-9-xyz');
+    warn.mockRestore();
+  });
+  it('records each wrong token in admin_failures with the caller IP', async () => {
+    const { rows } = failureLog();
+    await call('GET', 'admin/runs', { token: 'nope', ip: '10.4.0.1' });
+    expect(rows).toEqual([expect.objectContaining({ ip: '10.4.0.1' })]);
+    await call('GET', 'admin/runs', { ip: '10.4.0.1' }); // the right token adds nothing
+    expect(rows).toHaveLength(1);
+  });
+  it('after 20 failures in an hour (from any IP) every admin route answers 429, then recovers after 15 minutes', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-05T10:00:00Z'));
+    failureLog();
+    await fail(19);
+    expect((await call('GET', 'admin/runs', { ip: '10.3.0.1' })).status).toBe(200); // 19 is still fine
+    await call('GET', 'admin/runs', { token: 'wrong', ip: '10.3.0.2' }); // the 20th
+    for (const [m, p] of [['GET', 'admin/runs'], ['GET', 'admin/queue'], ['POST', 'admin/queue/7/approve'], ['POST', 'admin/paste'], ['PUT', 'admin/config/web']]) {
+      expect((await call(m, p, { ip: '10.3.1.' + p.length })).status, p).toBe(429);
+    }
+    vi.setSystemTime(new Date('2026-11-05T10:16:00Z'));
+    expect((await call('GET', 'admin/runs', { ip: '10.3.2.1' })).status).toBe(200);
+  });
+  it('does not lock out on failures older than an hour', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-05T10:00:00Z'));
+    failureLog();
+    await fail(20);
+    vi.setSystemTime(new Date('2026-11-05T11:01:00Z'));
+    expect((await call('GET', 'admin/runs', { ip: '10.3.3.1' })).status).toBe(200);
   });
 });
 

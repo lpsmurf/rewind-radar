@@ -1036,14 +1036,14 @@ describe('visitor chat', () => {
       post('chat/delete', { id }, undefined, token === undefined ? {} : { 'x-admin-token': token });
 
     it('deletes the message for the right token', async () => {
-      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open-sesame-open-sesame-open');
       const d = chatSetup();
-      expect((await del('sesame-open')).status).toBe(200);
+      expect((await del('sesame-open-sesame-open-sesame-open')).status).toBe(200);
       expect(deletesOf(d)).toEqual([['id', 5]]); // a hard delete, so Realtime tells everyone
     });
 
     it('refuses a wrong token and a missing token', async () => {
-      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open-sesame-open-sesame-open');
       const d = chatSetup();
       expect((await del('sesame-closed')).status).toBe(403);
       expect((await del('sesame')).status).toBe(403);
@@ -1062,18 +1062,18 @@ describe('visitor chat', () => {
     });
 
     it('allows 20 attempts per hour per IP, wrong tokens included (so guessing is slow)', async () => {
-      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open-sesame-open-sesame-open');
       chatSetup();
       const at = (ip: string, token: string) => post('chat/delete', { id: 5 }, ip, { 'x-admin-token': token });
       for (let i = 0; i < 20; i++) expect((await at('10.7.0.1', 'wrong')).status).toBe(403);
-      expect((await at('10.7.0.1', 'sesame-open')).status).toBe(429);
-      expect((await at('10.7.0.2', 'sesame-open')).status).toBe(200);
+      expect((await at('10.7.0.1', 'sesame-open-sesame-open-sesame-open')).status).toBe(429);
+      expect((await at('10.7.0.2', 'sesame-open-sesame-open-sesame-open')).status).toBe(200);
     });
 
     it('400s a bad id', async () => {
-      vi.stubEnv('ADMIN_TOKEN', 'sesame-open');
+      vi.stubEnv('ADMIN_TOKEN', 'sesame-open-sesame-open-sesame-open');
       chatSetup();
-      expect((await del('sesame-open', 'x')).status).toBe(400);
+      expect((await del('sesame-open-sesame-open-sesame-open', 'x')).status).toBe(400);
     });
   });
 });
