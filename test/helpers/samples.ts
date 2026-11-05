@@ -40,3 +40,11 @@ export const SAMPLE = {
   evidence: ['40,964 stars'],
   ai_directed_text: true,
 };
+
+/** A Supabase Auth user who signed in with GitHub. */
+export const githubMember = (login: string, id = `uid-${login}`) => ({
+  id,
+  app_metadata: { provider: 'github', providers: ['github'] },
+  user_metadata: { user_name: login },
+  identities: [{ provider: 'github' }],
+});

@@ -12,8 +12,12 @@ const CHAIN = [
   'ilike', 'like', 'or', 'order', 'limit', 'range', 'maybeSingle', 'single',
 ];
 
+/** What `auth.getUser(token)` knows: token -> user (anything else is rejected like an expired token). */
+export type FakeUser = Record<string, unknown>;
+
 export function fakeDb(handlers: Record<string, Handler> = {}) {
   const queries: Query[] = [];
+  const tokens: Record<string, FakeUser> = {};
   const run = (q: Query): Promise<Result> =>
     Promise.resolve((handlers[q.table] ?? (() => ({ data: null, error: null })))(q));
 
@@ -28,6 +32,8 @@ export function fakeDb(handlers: Record<string, Handler> = {}) {
 
   return {
     queries,
+    /** Register Bearer tokens for auth.getUser. */
+    tokens,
     on(table: string, h: Handler) {
       handlers[table] = h;
     },
@@ -37,6 +43,12 @@ export function fakeDb(handlers: Record<string, Handler> = {}) {
     },
     client: {
       from: (table: string) => builder(table),
+      auth: {
+        getUser: async (token: string) =>
+          tokens[token]
+            ? { data: { user: tokens[token] }, error: null }
+            : { data: { user: null }, error: { message: 'invalid JWT' } },
+      },
       rpc: (name: string, args?: unknown) => {
         const q: Query = { table: 'rpc:' + name, calls: [['args', args]] };
         queries.push(q);
