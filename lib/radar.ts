@@ -17,8 +17,12 @@ async function pool<T, R>(items: T[], size: number, fn: (t: T) => Promise<R>): P
   return out;
 }
 
-/** Fetch this week's top GitHub repos, have Claude review them, upsert as New Releases. */
-export async function refreshRadar(n = 20, onUsage?: OnUsage): Promise<number> {
+/**
+ * Fetch this week's top GitHub repos, have Claude review them, upsert as New Releases.
+ * `onStocked` gets the stocked repos (lowercase owner/repo) once they are on the shelf, for batch pre-assessment;
+ * it is best-effort: if it throws, the refresh still succeeds.
+ */
+export async function refreshRadar(n = 20, onUsage?: OnUsage, onStocked?: (repos: string[]) => Promise<unknown>): Promise<number> {
   const repos = await searchWeekly(n);
   const week = new Date();
   week.setUTCDate(week.getUTCDate() - ((week.getUTCDay() + 6) % 7));
@@ -47,6 +51,11 @@ export async function refreshRadar(n = 20, onUsage?: OnUsage): Promise<number> {
   const keep = rows.map((r) => `"${r.slug}"`).join(',');
   const { error: e2 } = await admin().from('tapes').update({ archived: true }).eq('kind', 'repo').not('slug', 'in', `(${keep})`);
   if (e2) throw new Error(e2.message);
+  try {
+    await onStocked?.(repos.map((r) => r.full_name.toLowerCase()));
+  } catch (e) {
+    console.warn('[radar] post-stock hook failed', e);
+  }
   return rows.length;
 }
 

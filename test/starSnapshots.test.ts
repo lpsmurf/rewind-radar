@@ -53,3 +53,18 @@ describe('refreshRadar', () => {
     expect(await refreshRadar(2)).toBe(2);
   });
 });
+
+describe('refreshRadar onStocked (batch pre-assessment hook)', () => {
+  it('hands the stocked repos over after stocking, lowercased', async () => {
+    const seen: string[][] = [];
+    await refreshRadar(2, undefined, async (repos) => { seen.push(repos); });
+    expect(seen).toEqual([['ann/tool', 'bob/lib']]);
+    // it ran after the tapes were written
+    const tapes = db.current.queries.findIndex((q: any) => q.table === 'tapes' && has(q, 'upsert'));
+    expect(tapes).toBeGreaterThanOrEqual(0);
+  });
+  it('never fails the refresh when the hook throws', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await refreshRadar(2, undefined, async () => { throw new Error('batch down'); })).toBe(2);
+  });
+});
