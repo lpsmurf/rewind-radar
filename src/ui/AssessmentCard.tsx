@@ -99,7 +99,7 @@ export default function AssessmentCard({ reply, tapes, onOpen, onShelve }: {
 
       {a.steps?.length > 0 && (
         <>
-          <p className="sub">STEPS</p>
+          <p className="sub">STEPS · FROM THE README, UNVERIFIED</p>
           <ol className="steps">{a.steps.map((s, i) => <li key={i}>{s}</li>)}</ol>
         </>
       )}
