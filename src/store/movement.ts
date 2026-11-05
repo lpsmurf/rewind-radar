@@ -150,11 +150,17 @@ export function keyVector(keys: Iterable<string>): Point {
 
 /** Smooth a remote character toward its last broadcast position (frame-rate independent). */
 export function lerpRemote(pos: Point, target: Point, dt: number): Point {
-  const dx = target.x - pos.x, dy = target.y - pos.y;
-  if (Math.hypot(dx, dy) < 0.3) return { x: target.x, y: target.y };
+  // Remote numbers are untrusted: clamp them, and never let NaN or Infinity into the drawn position.
+  const n = (v: number, fallback: number) => (Number.isFinite(v) ? Math.max(-LERP_LIMIT, Math.min(LERP_LIMIT, v)) : fallback);
+  const t = { x: n(target.x, 0), y: n(target.y, 0) };
+  const p = { x: n(pos.x, t.x), y: n(pos.y, t.y) };
+  const dx = t.x - p.x, dy = t.y - p.y;
+  if (Math.hypot(dx, dy) < 0.3) return t;
   const f = 1 - Math.exp(-dt * 10);
-  return { x: pos.x + dx * f, y: pos.y + dy * f };
+  const out = { x: p.x + dx * f, y: p.y + dy * f };
+  return Number.isFinite(out.x) && Number.isFinite(out.y) ? out : t;
 }
+const LERP_LIMIT = 1e6;
 
 export const MOVE_SEND_MS = 125; // about 8 updates per second
 

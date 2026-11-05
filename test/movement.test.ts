@@ -132,6 +132,26 @@ describe('keyVector', () => {
   });
 });
 
+describe('lerpRemote with hostile numbers', () => {
+  const finite = (p: { x: number; y: number }) => Number.isFinite(p.x) && Number.isFinite(p.y);
+  it('stays finite for 1e308 and NaN inputs', () => {
+    for (const [pos, target, dt] of [
+      [{ x: -1e308, y: 0 }, { x: 1e308, y: 0 }, 0.016],
+      [{ x: 1e308, y: 1e308 }, { x: -1e308, y: -1e308 }, 0.016],
+      [{ x: NaN, y: 3 }, { x: 10, y: 10 }, 0.016],
+      [{ x: 5, y: 5 }, { x: NaN, y: Infinity }, 0.016],
+      [{ x: 5, y: 5 }, { x: 10, y: 10 }, NaN],
+      [{ x: 5, y: 5 }, { x: 10, y: 10 }, Infinity],
+    ] as const) expect(finite(lerpRemote(pos, target, dt)), JSON.stringify([pos, target, dt])).toBe(true);
+  });
+  it('snaps to the target when the step is not a number', () => {
+    expect(lerpRemote({ x: 5, y: 5 }, { x: 10, y: 20 }, NaN)).toEqual({ x: 10, y: 20 });
+  });
+  it('recovers from a poisoned position', () => {
+    expect(lerpRemote({ x: NaN, y: NaN }, { x: 10, y: 20 }, 0.016)).toEqual({ x: 10, y: 20 });
+  });
+});
+
 describe('lerpRemote', () => {
   it('moves toward the target without overshooting', () => {
     const p = lerpRemote({ x: 0, y: 0 }, { x: 100, y: 50 }, 1 / 60);
