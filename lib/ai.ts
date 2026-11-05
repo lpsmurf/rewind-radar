@@ -25,12 +25,17 @@ const PRICES: Record<string, [number, number, number, number]> = {
   [HAIKU]: [0.1, 0.5, 0.01, 0.125],
   [SONNET]: [2, 10, 0.2, 2.5],
 };
+/** The web search server tool costs $10 per 1000 searches on top of the tokens. */
+const SEARCH_USD = 0.01;
 export function costUsd(
   model: string,
-  u: Pick<Anthropic.Usage, 'input_tokens' | 'output_tokens' | 'cache_read_input_tokens' | 'cache_creation_input_tokens'>,
+  u: Pick<Anthropic.Usage, 'input_tokens' | 'output_tokens' | 'cache_read_input_tokens' | 'cache_creation_input_tokens'> & {
+    server_tool_use?: { web_search_requests?: number } | null;
+  },
 ): number {
   const [i, o, cr, cw] = PRICES[model] ?? PRICES[SONNET];
-  return ((u.input_tokens ?? 0) * i + (u.output_tokens ?? 0) * o + (u.cache_read_input_tokens ?? 0) * cr + (u.cache_creation_input_tokens ?? 0) * cw) / 1e6;
+  const tokens = ((u.input_tokens ?? 0) * i + (u.output_tokens ?? 0) * o + (u.cache_read_input_tokens ?? 0) * cr + (u.cache_creation_input_tokens ?? 0) * cw) / 1e6;
+  return tokens + (u.server_tool_use?.web_search_requests ?? 0) * SEARCH_USD;
 }
 
 /** Strip what an attacker hides in text we show the model: comments, invisible/bidi characters, our own <data> tags. */
