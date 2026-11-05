@@ -116,6 +116,17 @@ describe('getAssessment', () => {
     expect(d.calls('ai_usage').filter((q: Query) => has(q, 'insert'))).toHaveLength(1);
   });
 
+  it('still serves the stale row when pricing a refused call throws (the estimate stays on the reservation)', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(row({ updated_at: daysAgo(8) }));
+    const bad = { get input_tokens(): number { throw new Error('bad usage'); }, output_tokens: 1 };
+    create.mockResolvedValue({ stop_reason: 'refusal', content: [], usage: bad });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await getAssessment(ref, allow)).toMatchObject({ cached: true, stale: true });
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'update') || has(q, 'delete'))).toBe(false); // placeholder left as is
+    warn.mockRestore();
+  });
+
   it('clamps the ring from the repo signals before storing it', async () => {
     const repoBody = JSON.parse(POSTIZ['/repos/gitroomhq/postiz-app'].body);
     stubGitHub({ ...POSTIZ, '/repos/gitroomhq/postiz-app': { body: JSON.stringify({ ...repoBody, archived: true }) } });

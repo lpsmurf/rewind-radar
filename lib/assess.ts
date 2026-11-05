@@ -184,9 +184,10 @@ export async function reserve(
   return {
     release,
     async settle(model, usage) {
-      const cost = costUsd(model, usage);
-      if (cost > o.reserveUsd) console.warn(`[${route}] cost ${cost} exceeded the reservation ${o.reserveUsd}: raise the estimate`);
+      let cost = 0; // stays 0 if pricing throws: the placeholder's estimate is then kept (conservative)
       try {
+        cost = costUsd(model, usage);
+        if (cost > o.reserveUsd) console.warn(`[${route}] cost ${cost} exceeded the reservation ${o.reserveUsd}: raise the estimate`);
         const { error } = await admin()
           .from('ai_usage')
           .update({
