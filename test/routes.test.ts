@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fakeDb, has, type Query } from './helpers/fakeDb.ts';
+import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { jsonReply, toolReply } from './helpers/anthropic.ts';
 import { LPSMURF, POSTIZ, stubGitHub } from './helpers/github.ts';
 
@@ -30,12 +30,16 @@ function setup(o: { spent?: number; inStore?: { slug: string; kind: string; genr
     'rpc:search_tapes': () => (o.searchError ? { data: null, error: { message: 'missing function' } } : { data: CANDS, error: null }),
     'rpc:ai_spend_today': () => ({ data: o.spent ?? 0, error: null }),
     assessments: () => ({ data: null, error: null }),
+    ai_usage: usageTable(),
     tapes: (q: Query) => (has(q, 'in') ? { data: o.inStore ?? null, error: null } : { data: CANDS, error: null }),
   });
   return db.current;
 }
 
-beforeEach(() => create.mockReset());
+beforeEach(() => {
+  create.mockReset();
+  create.mockResolvedValue(null); // vitest 3 flags a later mockRejectedValue as an unhandled error unless the mock had an implementation
+});
 
 describe('POST /clerk: plain questions', () => {
   it('answers junk with a canned line and no AI or DB call', async () => {
@@ -202,13 +206,41 @@ describe('every Anthropic route is budget-gated and metered', () => {
     return setup({ spent: 2 });
   };
 
-  it('/profile records Sonnet usage as route "profile"', async () => {
+  it('/profile reserves a "profile" row before the call, then settles it with the real usage', async () => {
     stubGitHub(PROFILE);
     const d = setup();
-    create.mockResolvedValue(toolReply('profile_radar', { answer: 'Nice shelf.', picks: [], aisle: 'counter' }));
+    let before: string[] = [];
+    create.mockImplementation(async () => {
+      before = d.calls('ai_usage').map((q: Query) => (has(q, 'insert') ? 'insert' : 'other'));
+      return toolReply('profile_radar', { answer: 'Nice shelf.', picks: [], aisle: 'counter' });
+    });
     const r = await post('profile', { github: 'lpsmurf', visitorId: vid() });
     expect(r.status).toBe(200);
-    expect(usageRoutes(d)).toMatchObject([{ route: 'profile' }]);
+    expect(before).toEqual(['insert', 'other']);
+    expect(usageRoutes(d)).toMatchObject([{ route: 'profile', cost_usd: 0.03 }]);
+    const upd = d.calls('ai_usage').filter((q: Query) => has(q, 'update'));
+    expect(upd).toHaveLength(1);
+    expect(arg(upd[0], 'update')).toMatchObject({ input_tokens: 1000, output_tokens: 200 });
+  });
+
+  it('/profile deletes its reservation when the call fails without usage', async () => {
+    stubGitHub(PROFILE);
+    const d = setup();
+    create.mockRejectedValue(new Error('network down'));
+    expect((await post('profile', { github: 'lpsmurf', visitorId: vid() })).status).toBe(500);
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(true);
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'update'))).toBe(false);
+  });
+
+  it('/profile over the cap deletes its reservation; a failing reservation insert is refused', async () => {
+    stubGitHub(PROFILE);
+    const d = setup();
+    d.on('ai_usage', usageTable(Array.from({ length: 30 }, () => ({ at: new Date().toISOString(), cost_usd: 0.01 }))));
+    expect((await post('profile', { github: 'lpsmurf', visitorId: vid() })).status).toBe(503);
+    expect(d.calls('ai_usage').some((q: Query) => has(q, 'delete'))).toBe(true);
+    d.on('ai_usage', usageTable([], { insertError: true }));
+    expect((await post('profile', { github: 'lpsmurf', visitorId: vid() })).status).toBe(503);
+    expect(create).not.toHaveBeenCalled();
   });
 
   it('/profile over budget answers 503 with no Anthropic call', async () => {
@@ -233,7 +265,7 @@ describe('every Anthropic route is budget-gated and metered', () => {
     const rows = (n: number, cost = 0.01) => Array.from({ length: n }, () => ({ at: new Date().toISOString(), cost_usd: cost }));
     const withUsage = (r: unknown) => {
       const d = setup();
-      d.on('ai_usage', (q: Query) => (has(q, 'select') ? (r === 'error' ? { data: null, error: { message: 'boom' } } : { data: r, error: null }) : { data: null, error: null }));
+      d.on('ai_usage', usageTable(r as any));
       return d;
     };
     const scan = () => post('profile', { github: 'lpsmurf', visitorId: vid() });
@@ -245,7 +277,7 @@ describe('every Anthropic route is budget-gated and metered', () => {
       expect(r.status).toBe(503);
       expect(r.body.error).toBe(CLERK_LINES.budgetBusy);
       expect(create).not.toHaveBeenCalled();
-      expect(has(d.calls('ai_usage').find((q: Query) => has(q, 'select'))!, 'eq', 'route', 'profile')).toBe(true);
+      expect(has(d.calls('ai_usage').find((q: Query) => has(q, 'select') && !has(q, 'insert'))!, 'eq', 'route', 'profile')).toBe(true);
     });
 
     it('503s once today\'s profile spend reaches AI_PROFILE_BUDGET_USD (default 1)', async () => {

@@ -53,3 +53,15 @@ export function arg(q: Query, method: string, i = 0): any {
 export function has(q: Query, method: string, ...args: unknown[]): boolean {
   return q.calls.some((c) => c[0] === method && args.every((a, i) => JSON.stringify(c[i + 1]) === JSON.stringify(a)));
 }
+
+/**
+ * The ai_usage table as the reserve-then-check code sees it: an insert (`.select('id').single()`) returns the
+ * reservation id, a plain select returns `rows` (or an error), update/delete succeed.
+ */
+export function usageTable(rows: unknown[] | 'error' = [], o: { insertError?: boolean } = {}) {
+  return (q: Query): Result => {
+    if (has(q, 'insert')) return o.insertError ? { data: null, error: { message: 'boom' } } : { data: { id: 900 }, error: null };
+    if (has(q, 'select')) return rows === 'error' ? { data: null, error: { message: 'boom' } } : { data: rows, error: null };
+    return { data: null, error: null };
+  };
+}

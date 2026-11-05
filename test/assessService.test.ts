@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { arg, fakeDb, has, type Query } from './helpers/fakeDb.ts';
+import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { jsonReply, textReply } from './helpers/anthropic.ts';
 import { POSTIZ, stubGitHub } from './helpers/github.ts';
 
@@ -23,8 +23,7 @@ function setup(row: Record<string, unknown> | null, spent = 0, usage: Usage[] | 
     'rpc:search_tapes': () => ({ data: CANDS, error: null }),
     'rpc:ai_spend_today': () => ({ data: spent, error: null }),
     tapes: () => ({ data: tape, error: null }),
-    ai_usage: (q: Query) =>
-      has(q, 'select') ? (usage === 'error' ? { data: null, error: { message: 'boom' } } : { data: usage, error: null }) : { data: null, error: null },
+    ai_usage: usageTable(usage),
   });
   return db.current;
 }
@@ -74,8 +73,8 @@ describe('getAssessment', () => {
     const up = arg(d.calls('assessments').find((q: Query) => has(q, 'upsert'))!, 'upsert');
     expect(up).toMatchObject({ repo: 'gitroomhq/postiz-app', model: SONNET, prompt_version: PROMPT_VERSION, input_tokens: 3000, output_tokens: 900 });
     expect(up.cost_usd).toBeGreaterThan(0);
-    const usage = arg(d.calls('ai_usage').find((q: Query) => has(q, 'insert'))!, 'insert');
-    expect(usage).toMatchObject({ route: 'assess', model: SONNET, repo: 'gitroomhq/postiz-app' });
+    const usage = arg(d.calls('ai_usage').find((q: Query) => has(q, 'update'))!, 'update');
+    expect(usage).toMatchObject({ input_tokens: 3000, output_tokens: 900 });
   });
 
   it('re-assesses an expired row and one from an older prompt version', async () => {
@@ -102,10 +101,11 @@ describe('getAssessment', () => {
     const d = setup(null);
     create.mockResolvedValue(reply);
     await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(AssessError);
-    const ins = d.calls('ai_usage').filter((q: Query) => has(q, 'insert'));
-    expect(ins).toHaveLength(1);
-    expect(arg(ins[0], 'insert')).toMatchObject({ route: 'assess', model: SONNET, repo: 'gitroomhq/postiz-app', input_tokens: 1000, output_tokens: 200 });
-    expect(arg(ins[0], 'insert').cost_usd).toBeGreaterThan(0);
+    expect(d.calls('ai_usage').filter((q: Query) => has(q, 'insert'))).toHaveLength(1); // the reservation
+    const upd = d.calls('ai_usage').filter((q: Query) => has(q, 'update'));
+    expect(upd).toHaveLength(1);
+    expect(arg(upd[0], 'update')).toMatchObject({ input_tokens: 1000, output_tokens: 200 });
+    expect(arg(upd[0], 'update').cost_usd).toBeGreaterThan(0);
   });
 
   it('meters a failed refresh and still serves the stale row', async () => {
@@ -158,8 +158,8 @@ describe('database-backed assess limits', () => {
     stubGitHub(POSTIZ);
     const d = setup(null);
     await getAssessment(ref, allow);
-    const q = d.calls('ai_usage').find((x: Query) => has(x, 'select'))!;
-    expect(arg(q, 'select')).toBe('at,cost_usd');
+    const q = d.calls('ai_usage').find((x: Query) => has(x, 'select') && !has(x, 'insert'))!;
+    expect(arg(q, 'select')).toBe('id,at,cost_usd');
     expect(has(q, 'eq', 'route', 'assess')).toBe(true);
     const since = q.calls.find((c: any) => c[0] === 'gte')!;
     expect(since[1]).toBe('at');
@@ -418,5 +418,106 @@ describe('usage is metered once, right after the Sonnet call', () => {
     const d = setup(null);
     await getAssessment(ref, allow);
     expect(inserts(d)).toHaveLength(1);
+  });
+});
+
+describe('reserve before calling Sonnet', () => {
+  const kinds = (d: any) => d.calls('ai_usage').map((q: Query) => (has(q, 'insert') ? 'insert' : has(q, 'update') ? 'update' : has(q, 'delete') ? 'delete' : 'select'));
+  const at = (minsAgo: number) => ({ at: new Date(Date.now() - minsAgo * 60_000).toISOString(), cost_usd: 0.01 });
+
+  it('inserts a placeholder row (id selected, estimated cost) before the Anthropic call', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    let seen: string[] = [];
+    let placeholder: any;
+    create.mockImplementation(async () => {
+      seen = kinds(d);
+      placeholder = d.calls('ai_usage').find((q: Query) => has(q, 'insert'));
+      return jsonReply(SAMPLE);
+    });
+    await getAssessment(ref, allow);
+    expect(seen).toEqual(['insert', 'select']); // reserved, then the limit query, then the call
+    expect(arg(placeholder, 'insert')).toMatchObject({ route: 'assess', repo: 'gitroomhq/postiz-app', cost_usd: 0.05 });
+    expect(placeholder.calls.some((c: any) => c[0] === 'select' && c[1] === 'id')).toBe(true);
+    expect(placeholder.calls.some((c: any) => c[0] === 'single')).toBe(true);
+  });
+
+  it('uses AI_ASSESS_RESERVE_USD for the estimate', async () => {
+    stubGitHub(POSTIZ);
+    vi.stubEnv('AI_ASSESS_RESERVE_USD', '0.2');
+    const d = setup(null);
+    await getAssessment(ref, allow);
+    expect(arg(d.calls('ai_usage').find((q: Query) => has(q, 'insert'))!, 'insert').cost_usd).toBe(0.2);
+  });
+
+  it('deletes the reservation and never calls Sonnet when the hourly cap is hit', async () => {
+    vi.stubEnv('AI_ASSESS_MAX_PER_HOUR', '2');
+    const d = setup(null, 0, [at(1), at(2)]);
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(RateLimitError);
+    expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
+    expect(has(d.calls('ai_usage')[2], 'eq', 'id', 900)).toBe(true);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('deletes the reservation when the reserve itself would pass the assess budget', async () => {
+    vi.stubEnv('AI_ASSESS_BUDGET_USD', '0.5');
+    const d = setup(null, 0, [{ ...at(5), cost_usd: 0.48 }]); // 0.48 + the 0.05 estimate > 0.5
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BudgetError);
+    expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('does not count its own reservation against the caps', async () => {
+    stubGitHub(POSTIZ);
+    vi.stubEnv('AI_ASSESS_MAX_PER_HOUR', '1');
+    setup(null, 0, [{ ...at(1), id: 900 } as any]); // the database returns our own row too
+    expect((await getAssessment(ref, allow))!.cached).toBe(false);
+  });
+
+  it('settles by updating the reservation with the real tokens and cost; no second insert', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    await getAssessment(ref, allow);
+    expect(kinds(d)).toEqual(['insert', 'select', 'update']);
+    const upd = d.calls('ai_usage')[2];
+    expect(has(upd, 'eq', 'id', 900)).toBe(true);
+    expect(arg(upd, 'update')).toMatchObject({ model: SONNET, input_tokens: 3000, output_tokens: 900, cache_read_tokens: 0, cache_write_tokens: 0 });
+    expect(arg(upd, 'update').cost_usd).toBeGreaterThan(0);
+    expect(arg(upd, 'update').cost_usd).not.toBe(0.05);
+  });
+
+  it('deletes the reservation when the call fails without usage (nothing was billed)', async () => {
+    stubGitHub(POSTIZ);
+    const d = setup(null);
+    create.mockRejectedValue(new Error('network down'));
+    await expect(getAssessment(ref, allow)).rejects.toThrow('network down');
+    expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
+  });
+
+  it('deletes the reservation when GitHub has no such repo', async () => {
+    stubGitHub({});
+    const d = setup(null);
+    expect(await getAssessment(parseRepoRef('https://github.com/gitroomhq/postiz-app')!, allow)).toBeNull();
+    expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
+  });
+
+  it('deletes the reservation when the per-IP limit says no, and serves the stale row', async () => {
+    const d = setup(row({ updated_at: daysAgo(8) }));
+    expect(await getAssessment(ref, { allowMiss: () => false })).toMatchObject({ stale: true });
+    expect(kinds(d)).toEqual(['insert', 'select', 'delete']);
+  });
+
+  it('fails closed when the reservation insert errors', async () => {
+    const d = setup(null);
+    d.on('ai_usage', usageTable([], { insertError: true }));
+    await expect(getAssessment(ref, allow)).rejects.toBeInstanceOf(BudgetError);
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('serves the stale row when the reservation insert errors', async () => {
+    const d = setup(row({ updated_at: daysAgo(8) }));
+    d.on('ai_usage', usageTable([], { insertError: true }));
+    expect(await getAssessment(ref, allow)).toMatchObject({ stale: true });
+    expect(create).not.toHaveBeenCalled();
   });
 });
