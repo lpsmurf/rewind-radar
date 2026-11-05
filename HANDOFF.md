@@ -46,7 +46,7 @@ A final Sonnet review of the diff led to six more fixes, also test-first: the `c
 
 ### Still to do for Phase 1 (Luis, in this order)
 1. **Apply `supabase/migrations/003_clerk.sql` before deploying this code**, through the SQL editor or `supabase link --project-ref onovfynfxuemvsrdetez` + `supabase db push`. The Sonnet paths now fail closed: without the migration, repo assessments and Scan my GitHub are refused, and the clerk answers from search only.
-2. Set the two secrets: `npx supabase secrets set GITHUB_TOKEN=<fine-grained, read-only, public repos> AI_DAILY_BUDGET_USD=5 --project-ref onovfynfxuemvsrdetez`. The optional caps (`AI_ASSESS_*`, `AI_PROFILE_*`) have defaults in code.
+2. Set the two secrets: `npx supabase secrets set GITHUB_TOKEN=<fine-grained, read-only, public repos> AI_DAILY_BUDGET_USD=3 AI_ASSESS_BUDGET_USD=1.5 --project-ref onovfynfxuemvsrdetez` (Luis chose $3/day on 2026-11-05). The other optional caps (`AI_ASSESS_*`, `AI_PROFILE_*`) have defaults in code.
 3. Re-verify in your local dev server:
    - a second Postiz ask is served from cache;
    - `ai_usage` gets rows (`assess`, then `fit`/`profile`);
@@ -116,6 +116,47 @@ A final Sonnet review of the diff led to six more fixes, also test-first: the `c
      - a chat message appears, with its bubble;
      - a message reported by 3 identities disappears in both windows.
   4. Deploy when you say so.
+
+### Phase 3 status: code done on branch `feat/sources`, PR stacked on the Phase 2 PR, not merged, not deployed
+- **Sources:**
+  - **GitHub weekly** (as before).
+  - **YouTube** (`lib/sources/youtube.ts`): the YouTube Data API searches the configured queries and channels for the last 7 days. GitHub links are pulled out of descriptions in code, and Haiku names explicit mentions only when there is no link. Usage is about 1,500 of the 10,000 daily quota units.
+  - **Web/X** (`lib/sources/web.ts`): one weekly Sonnet `web_search_20260209` call (max 5 searches), then a Haiku extraction. X posts are found only through web search, because the X API is paid and scraping breaks its terms.
+  - **Manual paste** in the admin panel.
+  - Every candidate is verified on GitHub before it is queued, and credited to the video or article it came from. Nothing is stocked without an admin approving it.
+  - Cost is about $0.15 a week.
+- **Admin panel `/#admin`** (ADMIN_TOKEN, at least 32 chars, kept in sessionStorage):
+  - Queue: approve or reject. Approve claims the row atomically and un-archives old tapes. A stocked tape's trust is "caution" unless it has a licence, is active and isn't archived.
+  - Paste, Spend per day/route, Runs, and Config (YouTube queries and channels, the web query).
+  - 20 failed logins an hour lock the admin for 15 minutes.
+- **Monthly Picks shelf:** on the 1st, `/sources/monthly` scores last month's tapes as votes cast that month × 3 + stars gained, from `star_snapshots`. The top 10 go into `monthly_picks`. The Weekly New Releases shelf shows only the latest week; older repo tapes move to their genre aisle.
+- **Batch pre-assessment:** newly stocked repos are assessed through Message Batches at half price, so the clerk card is instant.
+  - It is submitted after the radar refresh and collected on the next sources run.
+  - Collection is claimed first, so it never runs twice. Each result is done once, and failures are retried.
+  - The spend reservation stays open until collection. Own cap: `AI_BATCH_BUDGET_USD`, default $2, inside the daily budget.
+- **Migration `005_sources.sql`** (not applied): the queue, config, runs, snapshots, monthly picks, batches, admin failures and `spend_by_day`, plus two pg_cron jobs: sources Tue 09:00 UTC and monthly on the 1st at 09:30. The cron reads the secret from Vault. It runs twice cleanly on a local Postgres 17.
+- **Tests:** 545. tsc, build, sync-edge, `deno check` and gitleaks (no leaks) pass. A Sonnet review found six issues and a browser test found two (monthly votes always 0; old tapes stuck on the weekly shelf). All are fixed.
+- **Browser-verified locally** (mocked APIs):
+  - both shelves render;
+  - the admin login, paste, approve (the tape appears live) and reject;
+  - spend, runs, and config with validation;
+  - the cron routes refuse requests without the secret.
+- **Known small gaps:** the clerk's "go to aisle" for an old repo tape still points at New Releases. The batch reservation is all-or-nothing. In-memory rate limits are per isolate.
+
+### Everything Luis does by hand, in order (all phases)
+1. **Database:** apply migrations `003_clerk.sql`, then `004_chat.sql`, then `005_sources.sql` (SQL editor, or `supabase link` + `db push`). The new code refuses AI calls until 003 exists.
+2. **Secrets** (in your own terminal, never in chat):
+   `npx supabase secrets set GITHUB_TOKEN=github_pat_... AI_DAILY_BUDGET_USD=3 AI_ASSESS_BUDGET_USD=1.5 ADMIN_TOKEN=$(openssl rand -hex 32) YOUTUBE_API_KEY=... --project-ref onovfynfxuemvsrdetez`
+   - `GITHUB_TOKEN`: fine-grained, Public repositories, no permissions.
+   - `YOUTUBE_API_KEY`: Google Cloud → enable YouTube Data API v3 → API key restricted to that API. Optional; without it YouTube is skipped.
+   - Save the ADMIN_TOKEN in your password manager.
+3. **Cron secret in Vault** (SQL editor, once): `select vault.create_secret('<CRON_SECRET>', 'rewind_cron_secret');`
+4. **Optional, for GitHub sign-in:**
+   - create a GitHub OAuth App with callback `https://onovfynfxuemvsrdetez.supabase.co/auth/v1/callback`;
+   - turn on the GitHub provider in Supabase and add the site and localhost to the redirect allow-list;
+   - build the site with `VITE_GITHUB_SIGNIN=1`.
+5. **Merge** PR #1, then #2, #3 and the Phase 3 PR, retargeting each to `main`. CI is green on all of them.
+6. **Deploy** when you say so: `npm run deploy:api`, then `npm run deploy:site`. Afterwards, confirm on one request which header carries the visitor IP (`clientKey`).
 
 ### How to work (Luis's rules)
 - Delegate to subagents on the cheapest model that fits: Haiku for mechanical work and QA, Sonnet for implementation and review.

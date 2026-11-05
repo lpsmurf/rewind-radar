@@ -122,6 +122,8 @@ export async function budgetLeft(): Promise<boolean> {
 
 /** A placeholder ai_usage row held while a Sonnet call is in flight. Settle it with the real usage, or release it. */
 export interface Reservation {
+  /** The ai_usage row id of the placeholder (batches keep it, and settle it later with settleReserved). */
+  id: number;
   settle(model: string, usage: Usage): Promise<number>;
   release(): Promise<void>;
 }
@@ -189,6 +191,7 @@ export async function reserve(
     throw e;
   }
   return {
+    id: Number(id),
     release,
     async settle(model, usage) {
       let cost = 0; // stays 0 if pricing throws: the placeholder's estimate is then kept (conservative)
@@ -234,9 +237,45 @@ const reserveAssess = (key: string) =>
     busyRepo: key,
   });
 
-/** Log one Anthropic call to ai_usage and return its cost. Never throws. */
-export async function recordUsage(route: string, model: string, usage: Usage, repo?: string): Promise<number> {
-  const cost = costUsd(model, usage);
+/**
+ * Settle a placeholder you hold only by id (a Message Batch keeps its reservations across runs): swap the estimate for the real
+ * cost (`batch` = half price). Same row, so settling twice is harmless. Returns the cost; never throws.
+ */
+export async function settleReserved(id: number, model: string, usage: Usage, batch = false): Promise<number> {
+  const cost = costUsd(model, usage, batch);
+  try {
+    const { error } = await admin()
+      .from('ai_usage')
+      .update({
+        model,
+        input_tokens: usage.input_tokens ?? 0,
+        output_tokens: usage.output_tokens ?? 0,
+        cache_read_tokens: usage.cache_read_input_tokens ?? 0,
+        cache_write_tokens: usage.cache_creation_input_tokens ?? 0,
+        cost_usd: cost,
+      })
+      .eq('id', id);
+    if (error) console.warn('[usage]', error.message); // the estimate stays: conservative
+  } catch (e) {
+    console.warn('[usage]', e);
+  }
+  return cost;
+}
+
+/** Delete placeholders that will never be settled. Never throws. */
+export async function releaseReserved(ids: number[]): Promise<void> {
+  if (!ids.length) return;
+  try {
+    const { error } = await admin().from('ai_usage').delete().in('id', ids);
+    if (error) console.warn('[usage]', error.message);
+  } catch (e) {
+    console.warn('[usage]', e);
+  }
+}
+
+/** Log one Anthropic call to ai_usage and return its cost (`batch` = half price, for Message Batches results). Never throws. */
+export async function recordUsage(route: string, model: string, usage: Usage, repo?: string, batch = false): Promise<number> {
+  const cost = costUsd(model, usage, batch);
   try {
     const { error } = await admin().from('ai_usage').insert({
       route,
@@ -254,6 +293,22 @@ export async function recordUsage(route: string, model: string, usage: Usage, re
   }
   return cost;
 }
+
+/** The facts stored next to a cached assessment. */
+export const summarize = (facts: RepoFacts, signals: HealthSignals): RepoSummary => ({
+  full_name: facts.full_name,
+  html_url: facts.html_url,
+  description: facts.description,
+  language: facts.language,
+  topics: facts.topics,
+  stars: facts.stars,
+  forks: facts.forks,
+  license: facts.license,
+  pushed_at: facts.pushed_at,
+  archived: facts.archived,
+  open_issues: facts.open_issues,
+  signals,
+});
 
 // ---------- the assessment service ----------
 export interface AssessmentResult {
@@ -340,20 +395,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: (dryRun?: bool
     const cost = await slot.settle(model, usage); // meter before anything else can throw
     settled = true;
     const assessment = clampRing(normalizeAssessment(raw, cands.map((c) => c.slug)), signals);
-    const repo: RepoSummary = {
-      full_name: facts.full_name,
-      html_url: facts.html_url,
-      description: facts.description,
-      language: facts.language,
-      topics: facts.topics,
-      stars: facts.stars,
-      forks: facts.forks,
-      license: facts.license,
-      pushed_at: facts.pushed_at,
-      archived: facts.archived,
-      open_issues: facts.open_issues,
-      signals,
-    };
+    const repo = summarize(facts, signals);
     const reviewed_at = new Date().toISOString();
     const { error } = await admin().from('assessments').upsert({
       repo: key,

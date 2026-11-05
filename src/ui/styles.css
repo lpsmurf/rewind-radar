@@ -120,3 +120,17 @@ textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; r
 .cmsg .rep { margin-left: 6px; color: #ff4d4d; text-decoration: none; }
 .chat .cerr { color: #ff4d4d; margin: 6px 0 0; }
 .cmsg b.unver { color: #fff6d5; opacity: .8; }
+
+/* admin panel (/#admin) */
+.admin { max-width: 900px; margin: 0 auto; padding: 12px; }
+.admin header { margin-bottom: 12px; }
+.admin main { display: block; padding: 14px; }
+.admin label { display: block; font-size: 9px; margin-bottom: 10px; }
+.admin a { color: #ffd200; }
+.admin a.btn { color: #fff6d5; }
+.admin-item { border-bottom: 2px dashed #ffd200; padding: 10px 0; }
+.admin-item p { margin: 4px 0; }
+.admin-table { width: 100%; border-collapse: collapse; font-size: 9px; }
+.admin-table th { text-align: left; color: #ffd200; padding: 4px 6px; border-bottom: 3px solid #ffd200; }
+.admin-table td { padding: 4px 6px; border-bottom: 1px solid #1f4fbf; word-break: break-word; }
+.admin-table tr.tot td { color: #3ddc84; }

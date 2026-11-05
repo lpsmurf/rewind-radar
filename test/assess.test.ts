@@ -132,4 +132,10 @@ describe('costUsd', () => {
   it('falls back to Sonnet prices for an unknown model', () => {
     expect(costUsd('mystery', u(1_000_000, 0))).toBeCloseTo(2, 6);
   });
+  it('adds $0.01 per web search request', () => {
+    const withSearch = { ...u(0, 0), server_tool_use: { web_search_requests: 3 } };
+    expect(costUsd(SONNET, withSearch as any)).toBeCloseTo(0.03, 8);
+    expect(costUsd(SONNET, { ...u(1_000_000, 0), server_tool_use: { web_search_requests: 1 } } as any)).toBeCloseTo(2.01, 6);
+    expect(costUsd(SONNET, { ...u(0, 0), server_tool_use: null } as any)).toBe(0);
+  });
 });

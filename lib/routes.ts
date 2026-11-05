@@ -1,19 +1,26 @@
 import { admin } from './admin.ts';
-import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
+import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
-import { fetchProfile, fetchRepo, GitHubError } from './github.ts';
+import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef } from './github.ts';
+import { collectAssessBatches, submitAssessBatch } from './batchAssess.ts';
+import { buildMonthlyPicks, previousMonth } from './monthly.ts';
 import { refreshRadar } from './radar.ts';
+import { isConfigKey, parseSourceConfig } from './sources/config.ts';
+import { snapshotStars } from './stars.ts';
+import { SOURCES } from './sources/index.ts';
+import { liveCtx, manualSource, runSources } from './sources/pipeline.ts';
+import { stockedTape } from './sources/stock.ts';
 import { env } from './env.ts';
 import { aisleOf } from '../src/types.ts';
 
 const CORS: Record<string, string> = {
   'access-control-allow-origin': '*',
   'access-control-allow-headers': 'authorization, x-client-info, apikey, content-type, x-admin-token',
-  'access-control-allow-methods': 'GET, POST, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, PUT, OPTIONS',
 };
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...CORS, 'content-type': 'application/json' } });
@@ -63,6 +70,51 @@ function sameSecret(a: string, b: string): boolean {
   let diff = a.length ^ b.length;
   for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);
   return diff === 0;
+}
+
+const ADMIN_TOKEN_MIN = 32;
+const warnedShort = new Set<string>();
+const FAIL_MAX = 20; // wrong admin tokens in the last hour, from anyone
+const LOCK_MS = 15 * 60_000;
+
+/**
+ * The admin token check shared by every admin route (admin/* and chat/delete). Returns a Response to refuse, or null to go on.
+ * - ADMIN_TOKEN unset, or shorter than 32 characters, counts as unset: always 403 (a short one is logged once, never printed).
+ * - Wrong tokens are counted in the admin_failures table. After 20 in the last hour, from ANY IP, every admin route answers 429
+ *   until 15 minutes after the latest failure. This is a global lockout: fine for a single-owner admin, and it means guessing
+ *   cannot be sped up by spreading over many IPs or Edge instances. (The per-IP in-memory limit stays as well.)
+ */
+async function adminGate(req: Request, who: string): Promise<Response | null> {
+  const secret = env('ADMIN_TOKEN');
+  if (!secret) return json({ error: 'Forbidden' }, 403);
+  if (secret.length < ADMIN_TOKEN_MIN) {
+    if (!warnedShort.has(secret)) {
+      warnedShort.add(secret);
+      console.warn(`[admin] ADMIN_TOKEN is shorter than ${ADMIN_TOKEN_MIN} characters: admin routes stay closed until it is longer`);
+    }
+    return json({ error: 'Forbidden' }, 403);
+  }
+  const db = admin();
+  try {
+    const { data, error } = await db
+      .from('admin_failures')
+      .select('at')
+      .gt('at', new Date(Date.now() - HOUR).toISOString())
+      .order('at', { ascending: false })
+      .limit(FAIL_MAX);
+    if (error) throw error;
+    const rows = (data ?? []) as { at: string }[];
+    if (rows.length >= FAIL_MAX && Date.now() - new Date(rows[0].at).getTime() < LOCK_MS) return json({ error: 'Too many requests' }, 429);
+  } catch (e) {
+    console.error('[admin] could not read the failure counter', e);
+    return json({ error: 'Admin is resting' }, 503); // fail closed
+  }
+  if (!sameSecret(req.headers.get('x-admin-token') ?? '', secret)) {
+    const { error } = await db.from('admin_failures').insert({ ip: who });
+    if (error) console.error('[admin] could not count a failure', error.message);
+    return json({ error: 'Forbidden' }, 403);
+  }
+  return null;
 }
 
 /** The client IP: cf-connecting-ip (Cloudflare overwrites it), else the last x-forwarded-for hop; earlier hops are client-supplied. */
@@ -126,7 +178,7 @@ export async function handle(req: Request): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS });
   const path = new URL(req.url).pathname.replace(/^.*?\/api\/?/, '').replace(/\/$/, '');
   const who = clientKey(req);
-  const body = req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
+  const body = req.method === 'POST' || req.method === 'PUT' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
 
   // --- Claude clerk: tape recommendations, or a full assessment when the question holds a GitHub repo ---
   if (path === 'clerk' && req.method === 'POST') {
@@ -293,7 +345,7 @@ export async function handle(req: Request): Promise<Response> {
   // --- radar refresh: pg_cron calls this Mon + Thu; it refuses to run again within 60 hours ---
   if (path === 'radar/refresh') {
     const secret = env('CRON_SECRET');
-    const forced = !!secret && req.headers.get('x-cron-secret') === secret;
+    const forced = !!secret && sameSecret(req.headers.get('x-cron-secret') ?? '', secret);
     const db = admin();
     if (!(await budgetLeft())) return json({ ok: true, skipped: true, reason: 'budget' });
     const { data: last } = await db.from('radar_runs').select('ran_at').order('ran_at', { ascending: false }).limit(1).maybeSingle();
@@ -301,7 +353,7 @@ export async function handle(req: Request): Promise<Response> {
     if (!forced && hours < 60) return json({ ok: true, skipped: true, due_in_hours: Math.ceil(60 - hours) });
     const { data: run, error } = await db.from('radar_runs').insert({ stocked: 0 }).select('id').single();
     if (error || !run) return json({ error: 'Could not start refresh' }, 500);
-    const job = meter('radar', (onUsage) => refreshRadar(20, onUsage))
+    const job = meter('radar', (onUsage) => refreshRadar(20, onUsage, (repos) => submitAssessBatch(repos)))
       .then(async (n) => { await db.from('radar_runs').update({ stocked: n }).eq('id', run.id); return n; })
       .catch(async (e) => { console.error('[radar]', e); await db.from('radar_runs').delete().eq('id', run.id); throw e; });
     const rt = (globalThis as any).EdgeRuntime;
@@ -408,12 +460,186 @@ export async function handle(req: Request): Promise<Response> {
   // --- admin: delete a chat message for good (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
   if (path === 'chat/delete' && req.method === 'POST') {
     if (limited('delete-ip:' + who, 20)) return json({ error: CHAT_LINES.limit }, 429); // counts wrong tokens too
-    const secret = env('ADMIN_TOKEN');
-    if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const refused = await adminGate(req, who);
+    if (refused) return refused;
     const mid = Number(body.id);
     if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
     const { error } = await admin().from('chat_messages').delete().eq('id', mid);
     return error ? json({ error: 'Could not delete the message' }, 500) : json({ ok: true });
+  }
+
+  // --- sources: pg_cron calls this weekly (header x-cron-secret must equal CRON_SECRET; unset means always 403) ---
+  if (path === 'sources/run' && req.method === 'POST') {
+    const secret = env('CRON_SECRET');
+    if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    // finished pre-assessment batches go into the cache first; best-effort (collectAssessBatches never throws)
+    const job = collectAssessBatches().catch((e) => console.warn('[batch]', e)).then(() => runSources(SOURCES, liveCtx()));
+    const rt = (globalThis as any).EdgeRuntime;
+    if (rt?.waitUntil) {
+      rt.waitUntil(job.catch((e) => console.error('[sources]', e))); // keep working after we answer the cron call
+      return json({ ok: true, started: true }, 202);
+    }
+    try {
+      return json({ ok: true, ...(await job) });
+    } catch (e) {
+      console.error('[sources]', e);
+      return json({ error: 'Source run failed' }, 500);
+    }
+  }
+
+  // --- monthly shelf: pg_cron calls this on the 1st; it builds last calendar month's picks (database only, no AI) ---
+  if (path === 'sources/monthly' && req.method === 'POST') {
+    const secret = env('CRON_SECRET');
+    if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const month = previousMonth();
+    try {
+      return json({ ok: true, month, picked: (await buildMonthlyPicks(month)).length });
+    } catch (e) {
+      console.error('[monthly]', e);
+      return json({ error: 'Monthly picks failed' }, 500);
+    }
+  }
+
+  // --- admin panel API: header x-admin-token must equal ADMIN_TOKEN (unset or under 32 characters means always 403); 60 calls an hour per IP, wrong tokens included; 20 wrong tokens an hour overall lock every admin route for 15 minutes ---
+  if (path.startsWith('admin/')) {
+    if (limited('admin-ip:' + who, 60)) return json({ error: 'Too many requests' }, 429);
+    const refused = await adminGate(req, who);
+    if (refused) return refused;
+    const q = new URL(req.url).searchParams;
+    const db = admin();
+
+    if (path === 'admin/queue' && req.method === 'GET') {
+      const status = q.get('status') ?? 'pending';
+      if (!['pending', 'approving', 'approved', 'rejected', 'stocked'].includes(status)) return json({ error: 'Bad status' }, 400);
+      const { data, error } = await db.from('ingest_queue').select('*').eq('status', status).order('at', { ascending: false }).limit(200);
+      return error ? json({ error: 'Could not read the queue' }, 500) : json({ items: data ?? [] });
+    }
+
+    const act = /^admin\/queue\/([^/]+)\/(approve|reject)$/.exec(path);
+    if (act && req.method === 'POST') {
+      const id = Number(act[1]);
+      if (!Number.isSafeInteger(id) || id < 1) return json({ error: 'Bad id' }, 400);
+      if (act[2] === 'reject') {
+        const { data, error } = await db
+          .from('ingest_queue')
+          .update({ status: 'rejected', decided_at: new Date().toISOString() })
+          .eq('id', id)
+          .neq('status', 'stocked')
+          .select('id')
+          .maybeSingle();
+        if (error) return json({ error: 'Could not reject' }, 500);
+        return data ? json({ ok: true }) : json({ error: 'Not found' }, 404);
+      }
+      // Claim the row first, atomically: a second click (or a second tab) gets nothing back and spends nothing.
+      let claimed = false;
+      const giveBack = async () => {
+        if (!claimed) return;
+        try {
+          await db.from('ingest_queue').update({ status: 'pending' }).eq('id', id).eq('status', 'approving');
+        } catch (e) {
+          console.error('[admin:approve] could not put the row back', e);
+        }
+      };
+      try {
+        const { data: row, error } = await db.from('ingest_queue').update({ status: 'approving' }).eq('id', id).eq('status', 'pending').select('*').maybeSingle();
+        if (error) throw error;
+        if (!row) {
+          const { data: seen } = await db.from('ingest_queue').select('status').eq('id', id).maybeSingle();
+          return seen ? json({ error: `Already ${seen.status}` }, 409) : json({ error: 'Not found' }, 404);
+        }
+        claimed = true;
+        const done = () => db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
+        const ref = parseRepoRef(row.repo);
+        // The tape may already exist: live means nothing to do; archived means bring it back.
+        const slugs = ref ? [`gh-${ref.owner}-${ref.repo}`, `c-${ref.owner}-${ref.repo}`].map((x) => x.toLowerCase()) : [];
+        const { data: found, error: findErr } = slugs.length ? await db.from('tapes').select('slug,kind,archived').in('slug', slugs) : { data: [], error: null };
+        if (findErr) throw findErr;
+        const live = (found ?? []).find((t: { archived: boolean }) => !t.archived);
+        if (live) {
+          const { error: e } = await done();
+          if (e) throw e;
+          claimed = false;
+          return json({ ok: true, slug: live.slug, existing: true });
+        }
+        const old = (found ?? [])[0] as { slug: string; kind: string } | undefined;
+        if (!(await budgetLeft())) {
+          await giveBack();
+          return json({ error: CLERK_LINES.budgetBusy }, 503);
+        }
+        const facts = ref ? await fetchRepoFacts(ref) : null;
+        if (!facts) {
+          await giveBack();
+          return json({ error: 'That repo is no longer on GitHub' }, 404);
+        }
+        const review = await meter('admin', (onUsage) => reviewRepo(facts, onUsage));
+        const tape = stockedTape(facts, review, { url: row.credit_url, title: row.credit_title });
+        if (old) {
+          const { error: e } = await db.from('tapes').upsert({ ...tape, slug: old.slug, kind: old.kind }, { onConflict: 'slug' }).select('id').single();
+          if (e) throw e;
+        } else {
+          const ins = await db.from('tapes').insert(tape).select('id').single();
+          if (ins.error && ins.error.code !== '23505') throw ins.error;
+          if (ins.error) {
+            await done();
+            claimed = false;
+            return json({ error: 'Already in the store' }, 409);
+          }
+        }
+        await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
+        const { error: e } = await done();
+        if (e) throw e;
+        claimed = false;
+        return json({ ok: true, slug: old?.slug ?? tape.slug });
+      } catch (e) {
+        console.error('[admin:approve]', e);
+        await giveBack();
+        return json({ error: 'Could not stock that tape' }, 500);
+      }
+    }
+
+    if (path === 'admin/paste' && req.method === 'POST') {
+      const urls = body.urls;
+      if (!Array.isArray(urls) || urls.length < 1 || urls.length > 20 || !urls.every((u) => typeof u === 'string')) {
+        return json({ error: 'Send 1 to 20 links as urls: string[]' }, 400);
+      }
+      try {
+        // pasted links use no AI, so they ignore the daily budget
+        const out = await runSources([manualSource(urls.map((u) => u.slice(0, 300)))], { ...liveCtx(), budget: async () => true });
+        const s = out.sources[0];
+        if (s.error) return json({ error: s.error }, 500);
+        return json({ ok: true, found: s.found, queued: s.queued, ignored: urls.length - s.found });
+      } catch (e) {
+        console.error('[admin:paste]', e);
+        return json({ error: 'Could not queue those links' }, 500);
+      }
+    }
+
+    if (path === 'admin/spend' && req.method === 'GET') {
+      const n = Number(q.get('days'));
+      const days = Number.isFinite(n) && n >= 1 ? Math.min(90, Math.floor(n)) : 14;
+      const { data, error } = await db.rpc('spend_by_day', { days });
+      return error ? json({ error: 'Could not read spend' }, 500) : json({ days, rows: data ?? [] });
+    }
+
+    // the editable parts of source_config: GET reads, PUT replaces (the body is the value)
+    const cfg = /^admin\/config\/([^/]+)$/.exec(path);
+    if (cfg && (req.method === 'GET' || req.method === 'PUT')) {
+      const key = cfg[1];
+      if (!isConfigKey(key)) return json({ error: 'Not found' }, 404);
+      if (req.method === 'GET') {
+        const { data, error } = await db.from('source_config').select('value').eq('key', key).maybeSingle();
+        return error ? json({ error: 'Could not read the config' }, 500) : json({ key, value: data?.value ?? null });
+      }
+      const parsed = parseSourceConfig(key, body);
+      if ('error' in parsed) return json({ error: parsed.error }, 400);
+      const { error } = await db.from('source_config').upsert({ key, value: parsed.value }, { onConflict: 'key' });
+      return error ? json({ error: 'Could not save the config' }, 500) : json({ ok: true, key, value: parsed.value });
+    }
+
+    if (path === 'admin/runs' && req.method === 'GET') {
+      const { data, error } = await db.from('source_runs').select('*').order('at', { ascending: false }).limit(20);
+      return error ? json({ error: 'Could not read runs' }, 500) : json({ runs: data ?? [] });
+    }
   }
 
   return json({ error: 'Not found' }, 404);
