@@ -2,15 +2,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { jsonReply, toolReply } from './helpers/anthropic.ts';
 import { LPSMURF, POSTIZ, stubGitHub } from './helpers/github.ts';
+import { GitHubError } from '../lib/github.ts';
 
 const { create, db } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any } }));
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
+// The username check is tested in github.test.ts / identity.test.ts; here "ghost*" never exist and "outage*" hits a GitHub outage.
+vi.mock('../lib/github.ts', async (orig) => ({
+  ...(await orig<typeof import('../lib/github.ts')>()),
+  githubUserExists: async (login: string) => {
+    if (login.startsWith('outage')) throw new (await import('../lib/github.ts')).GitHubError(503);
+    return !login.startsWith('ghost');
+  },
+}));
 
 import { handle } from '../lib/routes.ts';
 import { CLERK_LINES } from '../lib/clerkGuard.ts';
 import { costUsd, HAIKU, SONNET } from '../lib/ai.ts';
-import { SAMPLE } from './helpers/samples.ts';
+import { githubMember, SAMPLE } from './helpers/samples.ts';
 
 const CANDS = [
   { slug: 'diagram-design', title: 'Diagram Design', genre: 'Design', blurb: 'Diagrams as SVG', kind: 'skill', match: true },
@@ -20,7 +29,10 @@ let n = 0;
 const vid = () => `visitor-${++n}-${Math.random().toString(16).slice(2, 8)}`;
 let ips = 0;
 /** Each call gets its own client IP unless one is passed: rate limits key on the IP now. */
+/** Clerk calls get a fresh light visitor (own username, so its bucket never fills) unless the test sets `github` or a Bearer token. */
+let shoppers = 0;
 const post = async (path: string, body: Record<string, unknown>, xff: string = `10.0.0.${++ips}`, extra: Record<string, string> = {}) => {
+  if (path === 'clerk' && !('github' in body) && !extra.authorization) body = { ...body, github: `shopper-${++shoppers}` };
   const r = await handle(new Request('http://localhost/api/' + path, { method: 'POST', headers: { 'content-type': 'application/json', 'x-forwarded-for': xff, ...extra }, body: JSON.stringify(body) }));
   return { status: r.status, body: (await r.json()) as any };
 };
@@ -114,13 +126,16 @@ describe('POST /clerk: pasted repos', () => {
     expect(create.mock.calls[1][0].model).toBe(HAIKU);
   });
 
-  it('ignores an invalid connected username', async () => {
-    stubGitHub(POSTIZ);
-    setup();
-    create.mockResolvedValue(jsonReply(SAMPLE));
-    const r = await post('clerk', { question: 'https://github.com/gitroomhq/postiz-app', visitorId: vid(), github: 'not a user!' });
-    expect(r.body.fit).toBeUndefined();
-    expect(create).toHaveBeenCalledOnce();
+  it('takes the fit from the signed-in login, not from the body', async () => {
+    stubGitHub({ ...POSTIZ, ...LPSMURF });
+    const d = setup();
+    d.tokens.tok = githubMember('lpsmurf');
+    create
+      .mockResolvedValueOnce(jsonReply(SAMPLE))
+      .mockResolvedValueOnce(toolReply('fit_check', { fit: 'strong', why: 'Your repos match.', helps: ['x'], first_step: 'Go.' }));
+    const r = await post('clerk', { question: 'https://github.com/gitroomhq/postiz-app', visitorId: vid(), github: 'someone-else' }, undefined, { authorization: 'Bearer tok' });
+    expect(r.body.fit).toMatchObject({ fit: 'strong' });
+    expect(String(create.mock.calls[1][0].messages[0].content)).toContain('lpsmurf');
   });
 
   it('points at the shelf when the repo is already stocked', async () => {
@@ -437,7 +452,7 @@ describe('rate limits key on the client IP, not the body', () => {
   it('falls back to a shared "anon" bucket without the header', async () => {
     setup();
     okReply();
-    const bare = () => handle(new Request('http://localhost/api/clerk', { method: 'POST', body: JSON.stringify({ question: 'a skill for diagrams', visitorId: vid() }) }));
+    const bare = () => handle(new Request('http://localhost/api/clerk', { method: 'POST', body: JSON.stringify({ question: 'a skill for diagrams', visitorId: vid(), github: `anon-user-${++shoppers}` }) }));
     for (let i = 0; i < 15; i++) expect((await bare()).status).toBe(200);
     expect((await bare()).status).toBe(429);
   });
@@ -541,5 +556,124 @@ describe('a broken spend meter fails closed on every Haiku route', () => {
     expect(await r.json()).toEqual({ ok: true, skipped: true, reason: 'budget' });
     expect(d.calls('radar_runs').some((q: Query) => has(q, 'insert'))).toBe(false);
     expect(create).not.toHaveBeenCalled();
+  });
+});
+
+describe('the clerk is for GitHub visitors only', () => {
+  const ASK = 'a skill for making diagrams';
+  const bearer = (t: string) => ({ authorization: `Bearer ${t}` });
+  const askAs = (github: string, ip?: string) => post('clerk', { question: ASK, visitorId: vid(), github }, ip);
+
+  it('turns a guest away with 401, before junk, Anthropic or the database', async () => {
+    const d = setup();
+    for (const question of [ASK, '???']) {
+      const r = await post('clerk', { question, visitorId: vid(), github: undefined });
+      expect(r).toEqual({ status: 401, body: { error: CLERK_LINES.gate, gate: 'github' } });
+    }
+    expect(create).not.toHaveBeenCalled();
+    expect(d.queries).toHaveLength(0);
+  });
+
+  it('turns away a malformed username like a guest', async () => {
+    setup();
+    expect((await askAs('not a user!')).body).toEqual({ error: CLERK_LINES.gate, gate: 'github' });
+  });
+
+  it('401s an unknown username with its own line', async () => {
+    const d = setup();
+    const r = await askAs('ghost-writer');
+    expect(r).toEqual({ status: 401, body: { error: CLERK_LINES.gateUnknown, gate: 'github' } });
+    expect(CLERK_LINES.gateUnknown).not.toBe(CLERK_LINES.gate);
+    expect(create).not.toHaveBeenCalled();
+    expect(d.queries).toHaveLength(0);
+  });
+
+  it('lets a real username through', async () => {
+    setup();
+    create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Rent it.', slugs: [], aisle: 'counter' }));
+    expect(await askAs('lpsmurf')).toEqual({ status: 200, body: { answer: 'Rent it.', slugs: [], aisle: 'counter' } });
+  });
+
+  it('lets a visitor through when GitHub is down (the IP limits still apply)', async () => {
+    setup();
+    create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Rent it.', slugs: [], aisle: 'counter' }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect((await askAs('outage-user')).status).toBe(200);
+  });
+
+  it('lets a signed-in GitHub member through with just a token', async () => {
+    const d = setup();
+    d.tokens.tok = githubMember('octo');
+    create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'Rent it.', slugs: [], aisle: 'counter' }));
+    const r = await post('clerk', { question: ASK, visitorId: vid(), github: undefined }, undefined, bearer('tok'));
+    expect(r.status).toBe(200);
+  });
+
+  it('an invalid token alone is a guest', async () => {
+    setup();
+    const r = await post('clerk', { question: ASK, visitorId: vid(), github: undefined }, undefined, bearer('bad'));
+    expect(r.status).toBe(401);
+  });
+
+  it('/profile stays open to guests', async () => {
+    stubGitHub({ ...LPSMURF, ...POSTIZ });
+    setup();
+    create.mockResolvedValue(toolReply('profile_radar', { answer: 'ok', picks: [], aisle: 'counter' }));
+    expect((await post('profile', { github: 'lpsmurf', visitorId: vid() })).status).toBe(200);
+  });
+
+  describe('limits key on the identity as well as the IP', () => {
+    beforeEach(() => {
+      setup();
+      create.mockResolvedValue(toolReply('recommend', { on_topic: true, answer: 'ok', slugs: [], aisle: 'counter' }));
+    });
+
+    it('one username shares 15 questions an hour across different IPs', async () => {
+      for (let i = 0; i < 15; i++) expect((await askAs('sharer')).status).toBe(200);
+      const r = await askAs('sharer');
+      expect(r.status).toBe(429);
+      expect((await askAs('SHARER')).status).toBe(429); // case does not matter
+      expect((await askAs('someone-new')).status).toBe(200);
+    });
+
+    it('a light visitor gets 5 new assessments an hour per username, across IPs', async () => {
+      stubGitHub(POSTIZ);
+      create.mockResolvedValue(jsonReply(SAMPLE));
+      const question = 'https://github.com/gitroomhq/postiz-app';
+      for (let i = 0; i < 5; i++) expect((await post('clerk', { question, visitorId: vid(), github: 'assessor' })).status).toBe(200);
+      expect((await post('clerk', { question, visitorId: vid(), github: 'assessor' })).status).toBe(429);
+    });
+
+    it('a member gets 40 questions an hour, past the light 15, even from one IP', async () => {
+      const d = db.current;
+      d.tokens.tok = githubMember('octo', 'uid-forty');
+      const ip = '7.7.7.7';
+      const ask = () => post('clerk', { question: ASK, visitorId: vid(), github: undefined }, ip, bearer('tok'));
+      for (let i = 0; i < 40; i++) expect((await ask()).status).toBe(200);
+      expect((await ask()).status).toBe(429);
+    });
+
+    it('a member gets 10 new assessments an hour', async () => {
+      db.current.tokens.tok = githubMember('octo', 'uid-assessor');
+      stubGitHub(POSTIZ);
+      create.mockResolvedValue(jsonReply(SAMPLE));
+      const question = 'https://github.com/gitroomhq/postiz-app';
+      const ask = () => post('clerk', { question, visitorId: vid(), github: undefined }, undefined, bearer('tok'));
+      for (let i = 0; i < 10; i++) expect((await ask()).status).toBe(200);
+      expect((await ask()).status).toBe(429);
+    });
+
+    it('members behind one shared NAT do not block each other', async () => {
+      const ip = '8.8.4.4';
+      for (let i = 0; i < 3; i++) db.current.tokens[`t${i}`] = githubMember(`member${i}`);
+      for (let i = 0; i < 3; i++)
+        for (let k = 0; k < 15; k++) expect((await post('clerk', { question: ASK, visitorId: vid(), github: undefined }, ip, bearer(`t${i}`))).status).toBe(200);
+    });
+
+    it('light visitors still share their IP bucket (15 an hour)', async () => {
+      const ip = '6.7.7.7';
+      for (let i = 0; i < 15; i++) expect((await askAs(`nat-user-${i}`, ip)).status).toBe(200);
+      expect((await askAs('nat-user-last', ip)).status).toBe(429);
+    });
   });
 });

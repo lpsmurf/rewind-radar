@@ -13,6 +13,8 @@ export const CLERK_LINES = {
   free: "My brain's on the fritz today, but I dug through the shelves for you. These look closest:",
   freeNone: "My brain's on the fritz and nothing on the shelves matched. Try different words, or come back tomorrow.",
   noRepo: "I looked everywhere, but GitHub doesn't have that one. Check the spelling, or make sure the repo is public.",
+  gate: "Hold on, kiddo! The clerk only serves GitHub folks. Give me your GitHub username or sign in with GitHub, and I'll help you out.",
+  gateUnknown: "I looked that username up and GitHub doesn't know it. Check the spelling and try again.",
   rateLimit: "Whoa, slow down! The clerk needs a break from all those reviews. Try again in a little while.",
 } as const;
 
