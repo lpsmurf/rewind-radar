@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { admin } from '../lib/admin';
 import { classifySkill } from '../lib/ai';
 import { pool } from '../lib/radar';
+import { provenance } from './provenance';
 
 // Usage: npm run seed:skills [-- --approve=slug1,slug2]
 const approve = new Set(
@@ -45,9 +46,13 @@ async function main() {
       held.push({ slug: x.slug, trust: x.r.trust, trust_reasons: x.r.trust_reasons, privacy_flags: x.r.privacy_flags });
       continue;
     }
+    const p = provenance(x.slug, x.md);
     rows.push({
-      kind: 'skill', slug: x.slug, title: x.title, genre: x.r.genre, blurb: x.r.blurb,
-      body_md: x.md, trust: x.r.trust, source_url: null,
+      kind: 'skill', slug: x.slug, title: x.title, genre: x.r.genre, blurb: x.r.blurb, trust: x.r.trust,
+      // Only our own skills are republished in full; third-party ones link to their original source.
+      body_md: p.own ? x.md : null,
+      source_url: p.own ? null : p.url,
+      submitter: p.own ? 'lpsmurf' : p.author,
     });
   }
 

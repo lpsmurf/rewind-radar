@@ -1,3 +1,4 @@
+import { isLinkedSkill } from '../lib/useStore';
 import type { Tape } from '../types';
 import { RING_COLORS } from '../types';
 
@@ -8,6 +9,7 @@ const KIND: Record<string, string> = {
 export default function TapePanel({ tape, onClose, onRent, onVote }: {
   tape: Tape; onClose(): void; onRent(): void; onVote(): void;
 }) {
+  const linked = isLinkedSkill(tape);
   return (
     <div className="overlay" onClick={onClose}>
       <div className="panel tape-panel" onClick={(e) => e.stopPropagation()}>
@@ -25,14 +27,16 @@ export default function TapePanel({ tape, onClose, onRent, onVote }: {
           {tape.language && <span>{tape.language}</span>}
           <span className={'trust ' + tape.trust}>{tape.trust.toUpperCase()}</span>
         </div>
-        {tape.submitter && <p className="small">Submitted by {tape.submitter}</p>}
+        {tape.kind === 'community' && tape.submitter && <p className="small">Submitted by {tape.submitter}</p>}
+        {linked && <p className="small">Original by {tape.submitter ?? 'its author'}. We link to it, we don't copy it.</p>}
+        {tape.kind === 'skill' && !linked && <p className="small">Made by {tape.submitter ?? 'the house'}. Free to rent.</p>}
         <p className="blurb">{tape.blurb}</p>
         <p className="small">{tape.rentals} rentals · {tape.votes} votes this week</p>
         <div className="row">
-          <button className="btn" onClick={onRent}>RENT</button>
+          <button className="btn" onClick={onRent}>{linked ? 'GET FROM SOURCE' : tape.kind === 'skill' ? 'RENT · COPY INSTALL' : 'RENT · COPY CLONE'}</button>
           <button className="btn alt" onClick={onVote}>VOTE ▲</button>
-          {tape.source_url && (
-            <a className="btn alt" href={tape.source_url} target="_blank" rel="noreferrer">OPEN ON GITHUB</a>
+          {tape.source_url && !linked && (
+            <a className="btn alt" href={tape.source_url} target="_blank" rel="noreferrer noopener">OPEN ON GITHUB</a>
           )}
         </div>
       </div>

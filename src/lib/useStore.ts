@@ -9,6 +9,11 @@ import { getVisitor } from './visitor';
 const COLS =
   'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
 
+/** A skill written by someone else: we link to its source rather than serve its text. */
+export function isLinkedSkill(t: Tape): boolean {
+  return (t.kind === 'skill' || t.kind === 'memory') && !!t.source_url;
+}
+
 function rentCommand(t: Tape): string {
   if (t.kind === 'skill' || t.kind === 'memory') {
     return `mkdir -p ~/.claude/skills/${t.slug} && curl -fsSL ${API_ABS}/tape/${t.slug} -o ~/.claude/skills/${t.slug}/SKILL.md`;
@@ -135,12 +140,18 @@ export function useStore() {
 
   const rent = useCallback(
     async (t: Tape) => {
-      try {
-        await navigator.clipboard.writeText(rentCommand(t));
-      } catch {
-        /* clipboard blocked */
+      if (isLinkedSkill(t)) {
+        // Third-party skill: send people to the original instead of copying someone else's work.
+        window.open(t.source_url!, '_blank', 'noopener,noreferrer');
+        say(`Opening the original${t.submitter ? ` by ${t.submitter}` : ''}. Be kind, rewind.`);
+      } else {
+        try {
+          await navigator.clipboard.writeText(rentCommand(t));
+        } catch {
+          /* clipboard blocked */
+        }
+        say('Copied! Be kind, rewind.');
       }
-      say('Copied! Be kind, rewind.');
       if (sb) {
         const { error } = await sb.from('rentals').insert({ tape_id: t.id, visitor_id: meRef.current.id });
         if (!error) bump(t.id, 'rentals');
