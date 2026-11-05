@@ -173,6 +173,18 @@ describe('POST /clerk: pasted repos', () => {
     expect(r.body.error).toBe(CLERK_LINES.rateLimit);
   });
 
+  it('a budget-refused request leaves the IP\'s 5 assessment slots intact', async () => {
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
+    stubGitHub(POSTIZ);
+    const question = 'https://github.com/gitroomhq/postiz-app';
+    const ip = '4.3.2.1';
+    setup({ spent: 3 });
+    for (let i = 0; i < 6; i++) expect((await post('clerk', { question, visitorId: vid() }, ip)).body.answer).toBe(CLERK_LINES.budget);
+    setup({ spent: 0 });
+    create.mockResolvedValue(jsonReply(SAMPLE));
+    for (let i = 0; i < 5; i++) expect((await post('clerk', { question, visitorId: vid() }, ip)).status).toBe(200);
+  });
+
   it('says so politely when the budget is spent', async () => {
     vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
     stubGitHub(POSTIZ);

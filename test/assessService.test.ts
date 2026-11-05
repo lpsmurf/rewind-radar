@@ -316,3 +316,21 @@ describe('expired row + rate limit', () => {
     await expect(getAssessment(ref, { allowMiss: () => false })).rejects.toBeInstanceOf(RateLimitError);
   });
 });
+
+describe('check order: refused requests do not use the per-IP slot', () => {
+  it('does not call allowMiss when the daily budget refuses', async () => {
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
+    const allowMiss = vi.fn(() => true);
+    setup(null, 2);
+    await expect(getAssessment(ref, { allowMiss })).rejects.toBeInstanceOf(BudgetError);
+    expect(allowMiss).not.toHaveBeenCalled();
+  });
+
+  it('does not call allowMiss when the database caps refuse', async () => {
+    vi.stubEnv('AI_ASSESS_MAX_PER_HOUR', '1');
+    const allowMiss = vi.fn(() => true);
+    setup(null, 0, [{ at: new Date().toISOString(), cost_usd: 0.01 }]);
+    await expect(getAssessment(ref, { allowMiss })).rejects.toBeInstanceOf(RateLimitError);
+    expect(allowMiss).not.toHaveBeenCalled();
+  });
+});

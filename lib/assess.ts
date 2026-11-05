@@ -215,10 +215,7 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
     if (!tapeErr && !tape && !(await repoExists(ref))) return null;
   }
 
-  if (!o.allowMiss()) {
-    if (row) return fromRow(row, true);
-    throw new RateLimitError();
-  }
+  // Budget and database caps first, so a refused request does not burn the visitor's per-IP slot.
   if (!(await budgetLeft({ failClosed: true }))) {
     if (row) return fromRow(row, true);
     throw new BudgetError();
@@ -228,6 +225,10 @@ export async function getAssessment(ref: RepoRef, o: { allowMiss: () => boolean 
   } catch (e) {
     if (row) return fromRow(row, true);
     throw e;
+  }
+  if (!o.allowMiss()) {
+    if (row) return fromRow(row, true);
+    throw new RateLimitError();
   }
 
   try {
