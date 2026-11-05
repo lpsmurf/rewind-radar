@@ -72,6 +72,51 @@ function sameSecret(a: string, b: string): boolean {
   return diff === 0;
 }
 
+const ADMIN_TOKEN_MIN = 32;
+const warnedShort = new Set<string>();
+const FAIL_MAX = 20; // wrong admin tokens in the last hour, from anyone
+const LOCK_MS = 15 * 60_000;
+
+/**
+ * The admin token check shared by every admin route (admin/* and chat/delete). Returns a Response to refuse, or null to go on.
+ * - ADMIN_TOKEN unset, or shorter than 32 characters, counts as unset: always 403 (a short one is logged once, never printed).
+ * - Wrong tokens are counted in the admin_failures table. After 20 in the last hour, from ANY IP, every admin route answers 429
+ *   until 15 minutes after the latest failure. This is a global lockout: fine for a single-owner admin, and it means guessing
+ *   cannot be sped up by spreading over many IPs or Edge instances. (The per-IP in-memory limit stays as well.)
+ */
+async function adminGate(req: Request, who: string): Promise<Response | null> {
+  const secret = env('ADMIN_TOKEN');
+  if (!secret) return json({ error: 'Forbidden' }, 403);
+  if (secret.length < ADMIN_TOKEN_MIN) {
+    if (!warnedShort.has(secret)) {
+      warnedShort.add(secret);
+      console.warn(`[admin] ADMIN_TOKEN is shorter than ${ADMIN_TOKEN_MIN} characters: admin routes stay closed until it is longer`);
+    }
+    return json({ error: 'Forbidden' }, 403);
+  }
+  const db = admin();
+  try {
+    const { data, error } = await db
+      .from('admin_failures')
+      .select('at')
+      .gt('at', new Date(Date.now() - HOUR).toISOString())
+      .order('at', { ascending: false })
+      .limit(FAIL_MAX);
+    if (error) throw error;
+    const rows = (data ?? []) as { at: string }[];
+    if (rows.length >= FAIL_MAX && Date.now() - new Date(rows[0].at).getTime() < LOCK_MS) return json({ error: 'Too many requests' }, 429);
+  } catch (e) {
+    console.error('[admin] could not read the failure counter', e);
+    return json({ error: 'Admin is resting' }, 503); // fail closed
+  }
+  if (!sameSecret(req.headers.get('x-admin-token') ?? '', secret)) {
+    const { error } = await db.from('admin_failures').insert({ ip: who });
+    if (error) console.error('[admin] could not count a failure', error.message);
+    return json({ error: 'Forbidden' }, 403);
+  }
+  return null;
+}
+
 /** The client IP: cf-connecting-ip (Cloudflare overwrites it), else the last x-forwarded-for hop; earlier hops are client-supplied. */
 // TODO: confirm which header is trustworthy on a deployed Supabase Edge request.
 function clientKey(req: Request): string {
@@ -300,7 +345,7 @@ export async function handle(req: Request): Promise<Response> {
   // --- radar refresh: pg_cron calls this Mon + Thu; it refuses to run again within 60 hours ---
   if (path === 'radar/refresh') {
     const secret = env('CRON_SECRET');
-    const forced = !!secret && req.headers.get('x-cron-secret') === secret;
+    const forced = !!secret && sameSecret(req.headers.get('x-cron-secret') ?? '', secret);
     const db = admin();
     if (!(await budgetLeft())) return json({ ok: true, skipped: true, reason: 'budget' });
     const { data: last } = await db.from('radar_runs').select('ran_at').order('ran_at', { ascending: false }).limit(1).maybeSingle();
@@ -415,8 +460,8 @@ export async function handle(req: Request): Promise<Response> {
   // --- admin: delete a chat message for good (header x-admin-token must equal env ADMIN_TOKEN; unset means always 403) ---
   if (path === 'chat/delete' && req.method === 'POST') {
     if (limited('delete-ip:' + who, 20)) return json({ error: CHAT_LINES.limit }, 429); // counts wrong tokens too
-    const secret = env('ADMIN_TOKEN');
-    if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const refused = await adminGate(req, who);
+    if (refused) return refused;
     const mid = Number(body.id);
     if (!Number.isSafeInteger(mid) || mid < 1) return json({ error: 'Bad message id' }, 400);
     const { error } = await admin().from('chat_messages').delete().eq('id', mid);
@@ -455,17 +500,17 @@ export async function handle(req: Request): Promise<Response> {
     }
   }
 
-  // --- admin panel API: header x-admin-token must equal ADMIN_TOKEN (unset means always 403); 60 calls an hour per IP, wrong tokens included ---
+  // --- admin panel API: header x-admin-token must equal ADMIN_TOKEN (unset or under 32 characters means always 403); 60 calls an hour per IP, wrong tokens included; 20 wrong tokens an hour overall lock every admin route for 15 minutes ---
   if (path.startsWith('admin/')) {
     if (limited('admin-ip:' + who, 60)) return json({ error: 'Too many requests' }, 429);
-    const secret = env('ADMIN_TOKEN');
-    if (!secret || !sameSecret(req.headers.get('x-admin-token') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const refused = await adminGate(req, who);
+    if (refused) return refused;
     const q = new URL(req.url).searchParams;
     const db = admin();
 
     if (path === 'admin/queue' && req.method === 'GET') {
       const status = q.get('status') ?? 'pending';
-      if (!['pending', 'approved', 'rejected', 'stocked'].includes(status)) return json({ error: 'Bad status' }, 400);
+      if (!['pending', 'approving', 'approved', 'rejected', 'stocked'].includes(status)) return json({ error: 'Bad status' }, 400);
       const { data, error } = await db.from('ingest_queue').select('*').eq('status', status).order('at', { ascending: false }).limit(200);
       return error ? json({ error: 'Could not read the queue' }, 500) : json({ items: data ?? [] });
     }
@@ -485,24 +530,69 @@ export async function handle(req: Request): Promise<Response> {
         if (error) return json({ error: 'Could not reject' }, 500);
         return data ? json({ ok: true }) : json({ error: 'Not found' }, 404);
       }
+      // Claim the row first, atomically: a second click (or a second tab) gets nothing back and spends nothing.
+      let claimed = false;
+      const giveBack = async () => {
+        if (!claimed) return;
+        try {
+          await db.from('ingest_queue').update({ status: 'pending' }).eq('id', id).eq('status', 'approving');
+        } catch (e) {
+          console.error('[admin:approve] could not put the row back', e);
+        }
+      };
       try {
-        const { data: row, error } = await db.from('ingest_queue').select('*').eq('id', id).maybeSingle();
+        const { data: row, error } = await db.from('ingest_queue').update({ status: 'approving' }).eq('id', id).eq('status', 'pending').select('*').maybeSingle();
         if (error) throw error;
-        if (!row) return json({ error: 'Not found' }, 404);
-        if (row.status !== 'pending' && row.status !== 'approved') return json({ error: `Already ${row.status}` }, 409);
-        if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
+        if (!row) {
+          const { data: seen } = await db.from('ingest_queue').select('status').eq('id', id).maybeSingle();
+          return seen ? json({ error: `Already ${seen.status}` }, 409) : json({ error: 'Not found' }, 404);
+        }
+        claimed = true;
+        const done = () => db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
         const ref = parseRepoRef(row.repo);
+        // The tape may already exist: live means nothing to do; archived means bring it back.
+        const slugs = ref ? [`gh-${ref.owner}-${ref.repo}`, `c-${ref.owner}-${ref.repo}`].map((x) => x.toLowerCase()) : [];
+        const { data: found, error: findErr } = slugs.length ? await db.from('tapes').select('slug,kind,archived').in('slug', slugs) : { data: [], error: null };
+        if (findErr) throw findErr;
+        const live = (found ?? []).find((t: { archived: boolean }) => !t.archived);
+        if (live) {
+          const { error: e } = await done();
+          if (e) throw e;
+          claimed = false;
+          return json({ ok: true, slug: live.slug, existing: true });
+        }
+        const old = (found ?? [])[0] as { slug: string; kind: string } | undefined;
+        if (!(await budgetLeft())) {
+          await giveBack();
+          return json({ error: CLERK_LINES.budgetBusy }, 503);
+        }
         const facts = ref ? await fetchRepoFacts(ref) : null;
-        if (!facts) return json({ error: 'That repo is no longer on GitHub' }, 404);
+        if (!facts) {
+          await giveBack();
+          return json({ error: 'That repo is no longer on GitHub' }, 404);
+        }
         const review = await meter('admin', (onUsage) => reviewRepo(facts, onUsage));
         const tape = stockedTape(facts, review, { url: row.credit_url, title: row.credit_title });
-        const ins = await db.from('tapes').insert(tape).select('id').single();
-        if (ins.error && ins.error.code !== '23505') throw ins.error;
-        if (!ins.error) await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
-        await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
-        return ins.error ? json({ error: 'Already in the store' }, 409) : json({ ok: true, slug: tape.slug });
+        if (old) {
+          const { error: e } = await db.from('tapes').upsert({ ...tape, slug: old.slug, kind: old.kind }, { onConflict: 'slug' }).select('id').single();
+          if (e) throw e;
+        } else {
+          const ins = await db.from('tapes').insert(tape).select('id').single();
+          if (ins.error && ins.error.code !== '23505') throw ins.error;
+          if (ins.error) {
+            await done();
+            claimed = false;
+            return json({ error: 'Already in the store' }, 409);
+          }
+        }
+        await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
+        const { error: e } = await done();
+        if (e) throw e;
+        claimed = false;
+        return json({ ok: true, slug: old?.slug ?? tape.slug });
       } catch (e) {
         console.error('[admin:approve]', e);
+        await giveBack();
         return json({ error: 'Could not stock that tape' }, 500);
       }
     }

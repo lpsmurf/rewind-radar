@@ -34,6 +34,8 @@ export interface Tape {
   submitter: string | null; // community only
   rentals: number;
   created_at: string;
+  /** Monday of the week a repo tape was stocked (repo tapes only; may be missing on old data). */
+  week?: string | null;
   /** votes this week (computed client-side from the tape_votes view + realtime) */
   votes: number;
 }
@@ -48,9 +50,19 @@ export interface Visitor {
   y?: number;
 }
 
-/** Which aisle a tape lives in. */
-export function aisleOf(t: Pick<Tape, 'kind' | 'genre'>): Aisle {
-  if (t.kind === 'repo') return 'new';
+/** The most recent `week` among repo tapes: the week the Weekly New Releases shelf shows. Null when none has one. */
+export function latestWeek(tapes: Pick<Tape, 'kind' | 'week'>[]): string | null {
+  let best: string | null = null;
+  for (const t of tapes) if (t.kind === 'repo' && t.week && (!best || t.week > best)) best = t.week;
+  return best;
+}
+
+/**
+ * Which aisle a tape lives in. Pass `newWeek` (latestWeek of the live tapes) and repo tapes from an earlier week leave the
+ * Weekly New Releases shelf for their genre aisle, where they stay browsable. Repo tapes without a week count as current.
+ */
+export function aisleOf(t: Pick<Tape, 'kind' | 'genre'> & { week?: string | null }, newWeek?: string | null): Aisle {
+  if (t.kind === 'repo') return newWeek && t.week && t.week < newWeek ? t.genre : 'new';
   if (t.kind === 'community') return 'community';
   return t.genre;
 }
