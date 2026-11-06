@@ -17,6 +17,36 @@ export function pastedUrls(text: string): string[] {
   return [...new Set(text.split(/[\s,]+/).filter(Boolean))].slice(0, 20);
 }
 
+/** The repo a line names, lowercase owner/repo: a github.com link or a bare owner/repo. null for anything else. */
+export function repoKey(line: string): string | null {
+  const m = line.trim().match(/^(?:(?:https?:\/\/)?(?:www\.)?github\.com\/|@)?([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100}?)(?:\.git)?(?:[/?#].*)?$/i);
+  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
+}
+
+/** The "Add repos" box: one line per repo, blanks and repeats (same repo, any spelling) dropped. Not capped: the panel shows the limit. */
+export function stockLines(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const key = repoKey(line) ?? line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(line);
+  }
+  return out;
+}
+
+const STOCK_LABELS: Record<string, string> = { added: 'ADDED', restored: 'RESTORED', duplicate: 'ALREADY IN STORE', not_found: 'NOT FOUND', invalid: 'INVALID', error: 'ERROR' };
+export const stockStatusLabel = (status: string): string => STOCK_LABELS[status] ?? 'ERROR';
+
+/** The lines worth fixing and retrying: anything that was not added, restored or already in the store. */
+export const failedLines = (results: { input: string; status: string }[]): string[] =>
+  results.filter((r) => r.status === 'not_found' || r.status === 'invalid' || r.status === 'error').map((r) => r.input);
+
+export const stockSummary = (r: { added: number; skipped: number }): string => `Added ${r.added} · skipped ${r.skipped}`;
+
 export interface SpendRow { day: string; route: string; calls: number | string; cost_usd: number | string }
 export interface SpendDay { day: string; total: number; routes: { route: string; calls: number; cost: number }[] }
 

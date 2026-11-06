@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adminHeaders, safeHref, formatUsd, isAdminHash, isChannelId, linesOf, pastedUrls, spendTable, shortDate } from '../src/lib/adminPanel.ts';
+import { adminHeaders, safeHref, formatUsd, isAdminHash, isChannelId, failedLines, linesOf, pastedUrls, repoKey, stockLines, stockStatusLabel, stockSummary, spendTable, shortDate } from '../src/lib/adminPanel.ts';
 
 describe('isAdminHash', () => {
   it('matches #admin only', () => {
@@ -85,5 +85,51 @@ describe('safeHref', () => {
     for (const u of ['javascript:alert(1)', ' javascript:alert(1)', 'data:text/html,x', 'vbscript:x', '//evil.example', 'ftp://x', 'youtu.be/x', 'https:/x', '', null, undefined]) {
       expect(safeHref(u as any), String(u)).toBeNull();
     }
+  });
+});
+
+describe('repoKey', () => {
+  it('reads a github.com link or a bare owner/repo, case-insensitively, and nothing else', () => {
+    expect(repoKey('https://github.com/Acme/Widget')).toBe('acme/widget');
+    expect(repoKey('github.com/acme/widget.git')).toBe('acme/widget');
+    expect(repoKey('  acme/widget ')).toBe('acme/widget');
+    expect(repoKey('not a link')).toBeNull();
+    expect(repoKey('https://example.com/a/b')).toBeNull();
+  });
+});
+
+describe('stockLines', () => {
+  it('keeps one trimmed line per row, drops blanks, and drops repeats of the same repo however it is written', () => {
+    const text = ' acme/widget \n\nhttps://github.com/ACME/Widget\r\nacme/gadget\nnope\nNOPE';
+    expect(stockLines(text)).toEqual(['acme/widget', 'acme/gadget', 'nope']);
+    expect(stockLines('')).toEqual([]);
+  });
+  it('does not cap: the panel shows the 20 limit itself', () => {
+    expect(stockLines(Array.from({ length: 25 }, (_, i) => `a/r${i}`).join('\n'))).toHaveLength(25);
+  });
+});
+
+describe('stockStatusLabel', () => {
+  it('uses plain words for every status', () => {
+    expect(['added', 'restored', 'duplicate', 'not_found', 'invalid', 'error'].map(stockStatusLabel)).toEqual(['ADDED', 'RESTORED', 'ALREADY IN STORE', 'NOT FOUND', 'INVALID', 'ERROR']);
+    expect(stockStatusLabel('???')).toBe('ERROR');
+  });
+});
+
+describe('failedLines and stockSummary', () => {
+  const results = [
+    { input: 'a/ok', status: 'added' },
+    { input: 'a/back', status: 'restored' },
+    { input: 'a/have', status: 'duplicate' },
+    { input: 'a/ghost', status: 'not_found' },
+    { input: 'garbage', status: 'invalid' },
+    { input: 'a/flaky', status: 'error' },
+  ];
+  it('keeps only the lines that failed (not found, invalid, error), so they can be fixed and retried', () => {
+    expect(failedLines(results)).toEqual(['a/ghost', 'garbage', 'a/flaky']);
+    expect(failedLines([])).toEqual([]);
+  });
+  it('summarises added and skipped', () => {
+    expect(stockSummary({ added: 7, skipped: 3 })).toBe('Added 7 · skipped 3');
   });
 });
