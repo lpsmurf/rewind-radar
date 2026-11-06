@@ -375,13 +375,13 @@ describe('watchChannels automatic backfill (cron path, auto: true)', () => {
     expect((s.store.watch as any).channels[0].backfilled_at).toBe(NOW.toISOString());
   });
   it('keeps backfilling (no backfilled_at) while videos remain, and records how many are left', async () => {
-    api(Array.from({ length: 13 }, (_, i) => vid(`v${i}`, 24 * (100 - i))), {});
+    api(Array.from({ length: 45 }, (_, i) => vid(`v${i}`, 24 * (100 - i))), {}); // the cron batch loop stops at 40 videos
     const s = setup();
     const r = await watchChannels(s.ctx, { auto: true });
-    expect(r.remaining).toBe(3);
+    expect(r.remaining).toBe(5);
     const ch = (s.store.watch as any).channels[0];
     expect(ch.backfilled_at).toBeUndefined();
-    expect(ch.backfill_left).toBe(3);
+    expect(ch.backfill_left).toBe(5);
     await watchChannels(s.ctx, { auto: true });
     const done = (s.store.watch as any).channels[0];
     expect(done.backfilled_at).toBe(NOW.toISOString());
@@ -408,5 +408,96 @@ describe('watchChannels automatic backfill (cron path, auto: true)', () => {
     const s = setup({ watch: { channels: [{ handle: '@Chan', backfilled_at: at }], seen: [] } });
     await watchChannels(s.ctx, { auto: true });
     expect((s.store.watch as any).channels[0]).toEqual({ ...resolved, backfilled_at: at });
+  });
+});
+
+describe('watchChannels batch loop while backfilling (auto: true)', () => {
+  const many = (n: number, o: (i: number) => Partial<WatchVideo> = () => ({})) => Array.from({ length: n }, (_, i) => vid(`v${i}`, 24 * (100 - i * 0.5), o(i)));
+  const links = (id: string, k: number) => ({ [id]: [owner(Array.from({ length: k }, (_, j) => `https://github.com/${id}/r${j}`).join(' '))] });
+  const playlistCalls = (calls: { kind: string }[]) => calls.filter((c) => c.kind === 'playlistItems').length;
+
+  it('runs batches of 10 until nothing is left, and logs the run once', async () => {
+    const calls = api(many(25));
+    const s = setup();
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.videos_checked).toBe(25);
+    expect(r.remaining).toBe(0);
+    expect(playlistCalls(calls)).toBe(3);
+    expect(s.runs).toHaveLength(1);
+    expect((s.store.watch as any).channels[0].backfilled_at).toBe(NOW.toISOString());
+  });
+  it('stops at 40 videos', async () => {
+    const calls = api(many(48)); // one playlist page of 50 per batch
+    const s = setup();
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.videos_checked).toBe(40);
+    expect(r.remaining).toBe(8);
+    expect(playlistCalls(calls)).toBe(4);
+    expect((s.store.watch as any).channels[0].backfilled_at).toBeUndefined();
+    expect((s.store.watch as any).channels[0].backfill_left).toBe(8);
+  });
+  it('stops at 60 repos stocked, with no batch stocking past it', async () => {
+    const vids = many(30);
+    api(vids, Object.assign({}, ...vids.map((v) => links(v.id, 3))));
+    const s = setup();
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(s.stocked).toHaveLength(60);
+    expect(r.added).toBe(60);
+    expect(r.remaining).toBeGreaterThan(0);
+    expect(r.videos_checked).toBeLessThan(40);
+  });
+  it('stops when the AI budget is spent', async () => {
+    const calls = api(many(48));
+    let n = 0;
+    const s = setup({ budget: () => n++ < 10 });
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.videos_checked).toBe(10);
+    expect(r.skipped).toMatch(/budget/);
+    expect(playlistCalls(calls)).toBe(2);
+  });
+  it('stops after 100 s of wall time, measured by ctx.clock', async () => {
+    const calls = api(many(48));
+    const s = setup();
+    let t = 0;
+    s.ctx.clock = () => t;
+    s.ctx.stock = async () => ({ status: 'added' });
+    // each batch costs 60 s: the first batch ends at 60 s (carry on), the second at 120 s (stop)
+    const cfg = s.ctx.config;
+    s.ctx.config = async (k) => {
+      const v = await cfg(k);
+      t += 30_000; // two config reads per batch
+      return v;
+    };
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.videos_checked).toBe(20);
+    expect(playlistCalls(calls)).toBe(2);
+  });
+  it('does not stop early on the clock when the batches are quick', async () => {
+    api(many(48));
+    const s = setup();
+    s.ctx.clock = () => 5_000;
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.videos_checked).toBe(40);
+  });
+  it('a normal run (nothing backfilling) keeps one batch and the latest 5', async () => {
+    const calls = api(Array.from({ length: 20 }, (_, i) => vid(`v${i}`, 72 + i)));
+    const s = setup({ watch: { channels: [{ handle: '@Chan', channel_id: CH, uploads: UPLOADS, backfilled_at: hoursAgo(5) }], seen: [] } });
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.videos_checked).toBe(5); // a normal run reads the latest 5
+    expect(playlistCalls(calls)).toBe(1);
+  });
+  it('stops when a batch makes no progress instead of looping', async () => {
+    const calls = api(many(5), {}, { fail: (k) => (k === 'commentThreads' ? 500 : undefined) });
+    const s = setup();
+    await watchChannels(s.ctx, { auto: true });
+    expect(playlistCalls(calls)).toBeLessThanOrEqual(2);
+  });
+  it('the explicit admin run stays one batch of 10 even with an unfinished channel', async () => {
+    const calls = api(many(25));
+    const s = setup();
+    const r = await watchChannels(s.ctx, { days: 120 });
+    expect(r.videos_checked).toBe(10);
+    expect(r.remaining).toBe(15);
+    expect(playlistCalls(calls)).toBe(1);
   });
 });

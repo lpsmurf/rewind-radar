@@ -17,7 +17,11 @@ const PAGE_MAX = 4; // playlist pages read per channel in a backfill (50 videos 
 const VIDEOS_PER_RUN = 10;
 const FRESH_MS = 48 * 3_600_000;
 const SEEN_MAX = 1000; // a 4 month backfill of a busy channel must not forget ids and start over
-const RUN_CAP = 25; // repos stocked per run
+const RUN_CAP = 25; // repos stocked per batch
+// While a channel is backfilling, the cron run chains batches of VIDEOS_PER_RUN within these limits (Edge Functions are cut off at 150 s).
+const AUTO_MAX_VIDEOS = 40;
+const AUTO_MAX_REPOS = 60;
+const AUTO_MAX_MS = 100_000;
 const MAX_CHANNELS = 10;
 export const AUTO_BACKFILL_DAYS = 120; // a channel without backfilled_at is read this far back on the cron path
 
@@ -49,6 +53,8 @@ export interface WatchCtx {
   stock: (repo: string, credit: { url: string; title: string }) => Promise<StockResult>;
   logRun: (row: { found: number; queued: number; cost_usd: number; error?: string }) => Promise<void>;
   now: Date;
+  /** Milliseconds clock for the wall-time limit of a backfill run (tests pass their own); defaults to Date.now. */
+  clock?: () => number;
 }
 export interface WatchSummary {
   channels: number;
@@ -128,16 +134,60 @@ const asConfig = (v: unknown): WatchConfig => {
   return { channels, seen: (Array.isArray(o.seen) ? o.seen : []).filter((s): s is string => typeof s === 'string') };
 };
 
+interface PassLimits {
+  videos: number;
+  repos: number;
+}
+interface Pass {
+  sum: WatchSummary;
+  /** Nothing to do (no key, no channels): no run row is logged. */
+  idle: boolean;
+  /** Some channel is still in its first-time backfill after this batch. */
+  backfilling: boolean;
+  stocked: number;
+  messages: string[];
+}
+
+/**
+ * The cron run (auto: true): one batch, or while any channel is backfilling, batches of 10 videos until nothing is left, 40 videos,
+ * 60 repos, the AI budget or 100 s of wall time. An explicit run (admin) is one batch. One source_runs row per run.
+ */
 export async function watchChannels(ctx: WatchCtx, opts: { days?: number; auto?: boolean } = {}): Promise<WatchSummary> {
+  const clock = ctx.clock ?? Date.now;
+  const start = clock();
+  let p = await watchBatch(ctx, opts, { videos: VIDEOS_PER_RUN, repos: RUN_CAP });
+  if (p.idle) return p.sum;
+  const total = p.sum;
+  let stocked = p.stocked;
+  const messages = [...p.messages];
+  while (opts.auto && p.backfilling && p.sum.remaining > 0 && p.sum.videos_checked > 0 && !p.sum.skipped && total.videos_checked < AUTO_MAX_VIDEOS && stocked < AUTO_MAX_REPOS && clock() - start < AUTO_MAX_MS) {
+    p = await watchBatch(ctx, opts, { videos: Math.min(VIDEOS_PER_RUN, AUTO_MAX_VIDEOS - total.videos_checked), repos: Math.min(RUN_CAP, AUTO_MAX_REPOS - stocked) });
+    for (const k of ['videos_checked', 'repos_found', 'added', 'restored', 'duplicates', 'errors', 'not_found', 'cost_usd'] as const) total[k] += p.sum[k];
+    total.remaining = p.sum.remaining;
+    if (p.sum.skipped) total.skipped = p.sum.skipped;
+    stocked += p.stocked;
+    messages.push(...p.messages);
+  }
+  if (messages.length) total.messages = messages;
+  try {
+    await ctx.logRun({ found: total.repos_found, queued: total.added + total.restored, cost_usd: total.cost_usd, error: messages.length ? messages.join('; ').slice(0, 500) : undefined });
+  } catch (e) {
+    console.warn('[watch] could not log the run', e);
+  }
+  return total;
+}
+
+async function watchBatch(ctx: WatchCtx, opts: { days?: number; auto?: boolean }, limits: PassLimits): Promise<Pass> {
   const days = typeof opts.days === 'number' && Number.isFinite(opts.days) ? Math.min(MAX_DAYS, Math.max(1, Math.floor(opts.days))) : DEFAULT_DAYS;
   /** The cron path (auto) reads each channel back by its own state; an explicit run reads every channel `days` back. */
   const daysFor = (c: WatchChannel): number => (opts.auto ? (c.backfilled_at ? DEFAULT_DAYS : AUTO_BACKFILL_DAYS) : days);
   const sum: WatchSummary = { channels: 0, videos_checked: 0, repos_found: 0, added: 0, restored: 0, duplicates: 0, errors: 0, not_found: 0, cost_usd: 0, remaining: 0 };
   const key = env('YOUTUBE_API_KEY');
-  if (!key) return { ...sum, skipped: 'YOUTUBE_API_KEY is not set' };
+  const idle = (): Pass => ({ sum, idle: true, backfilling: false, stocked: 0, messages: [] });
+  if (!key) return { ...idle(), sum: { ...sum, skipped: 'YOUTUBE_API_KEY is not set' } };
   const cfg = asConfig(await ctx.config('watch'));
   sum.channels = cfg.channels.length;
-  if (!cfg.channels.length) return sum;
+  if (!cfg.channels.length) return idle();
 
   const messages: string[] = [];
   const done: string[] = [];
@@ -188,7 +238,7 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number; auto?:
         }
         found.sort((x, y) => x.published - y.published); // oldest first: a backfill advances chronologically
         for (const { it, id, published } of found) {
-          if (halted || checked >= VIDEOS_PER_RUN) {
+          if (halted || checked >= limits.videos) {
             pending++;
             chPending++;
             continue;
@@ -212,10 +262,10 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number; auto?:
           const credit = { url: `https://www.youtube.com/watch?v=${id}`, title: `${title} · ${channelTitle}`.slice(0, 200) };
           let complete = true;
           for (const repo of repos) {
-            if (stocked >= RUN_CAP || !(await ctx.budget())) {
+            if (stocked >= limits.repos || !(await ctx.budget())) {
               halted = true;
               complete = false;
-              if (stocked < RUN_CAP) sum.skipped = 'AI budget spent, will retry';
+              if (stocked < limits.repos) sum.skipped = 'AI budget spent, will retry';
               break;
             }
             stocked++;
@@ -270,11 +320,6 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number; auto?:
     }
   }
   sum.remaining = pending;
-  if (messages.length) sum.messages = messages;
-  try {
-    await ctx.logRun({ found: sum.repos_found, queued: sum.added + sum.restored, cost_usd: sum.cost_usd, error: messages.length ? messages.join('; ').slice(0, 500) : undefined });
-  } catch (e) {
-    console.warn('[watch] could not log the run', e);
-  }
-  return sum;
+  const backfilling = !!opts.auto && cfg.channels.some((c) => !c.backfilled_at && !finished.has(keyOf(c)));
+  return { sum, idle: false, backfilling, stocked, messages };
 }
