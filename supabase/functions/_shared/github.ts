@@ -282,7 +282,10 @@ const VISITOR_KEYS_MAX = 2000;
 
 const STOP = new Set(
   ('a an and are as at be by can for from get how i in is it me my of on or that the this to want what which with you ' +
-    'need find looking something some any please skill skills tool tools repo repos github').split(' '),
+    'need find looking something some any please skill skills tool tools repo repos github ' +
+    // filler that is rarely in a repo description; GitHub ANDs every keyword, so one of these can zero a search
+    'library libraries framework frameworks package packages build building make making create creating app apps ' +
+    'use using best good great simple easy new code project projects help helps way like cool top recommend').split(' '),
 );
 
 /** Plain lowercase keywords: quotes, qualifiers (`user:x`), operators and punctuation are dropped; at most 5 distinct terms. */
@@ -359,11 +362,20 @@ export async function searchRepos(q: string, o: { limit?: number; language?: str
   searchTimes.push(now);
   const p = (async () => {
     try {
-      const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery(terms, o.language, now))}&sort=stars&order=desc&per_page=${limit}`;
-      const r = await fetch(url, { headers: headers() });
-      if (!r.ok) throw new GitHubError(r.status);
-      const j: any = await r.json();
-      const hits = (Array.isArray(j.items) ? j.items : []).filter(goodHit).slice(0, limit).map(toHit);
+      const ask = async (ts: string[]) => {
+        const url = `https://api.github.com/search/repositories?q=${encodeURIComponent(searchQuery(ts, o.language, now))}&sort=stars&order=desc&per_page=${limit}`;
+        const r = await fetch(url, { headers: headers() });
+        if (!r.ok) throw new GitHubError(r.status);
+        const j: any = await r.json();
+        return (Array.isArray(j.items) ? j.items : []).filter(goodHit).slice(0, limit).map(toHit) as RepoHit[];
+      };
+      let hits = await ask(terms);
+      // GitHub requires every keyword to match: when a long question finds nothing, retry once with its first two terms
+      // (the most specific ones come first in a question). The retry counts against the per-minute ceiling.
+      if (!hits.length && terms.length > 2 && searchTimes.length < SEARCH_PER_MINUTE) {
+        searchTimes.push(Date.now());
+        hits = await ask(terms.slice(0, 2));
+      }
       searches.delete(key);
       searches.set(key, { at: Date.now(), hits });
       if (searches.size > SEARCH_MAX) searches.delete(searches.keys().next().value as string);
