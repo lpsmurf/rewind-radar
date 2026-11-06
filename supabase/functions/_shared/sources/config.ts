@@ -1,9 +1,11 @@
 /** The source_config rows the admin panel may edit, and their shape. Everything else is refused. */
-export const CONFIG_KEYS = ['youtube', 'web'] as const;
+export const CONFIG_KEYS = ['youtube', 'web', 'watch'] as const;
 export type ConfigKey = (typeof CONFIG_KEYS)[number];
 export const isConfigKey = (k: string): k is ConfigKey => (CONFIG_KEYS as readonly string[]).includes(k);
 
 const CHANNEL = /^UC[\w-]{22}$/;
+const HANDLE = /^@[A-Za-z0-9._-]{3,30}$/;
+const MAX_WATCH = 10;
 
 function list(v: unknown, max: number, what: string, ok: (s: string) => boolean, rule: string): string[] | string {
   if (!Array.isArray(v)) return `${what} must be a list`;
@@ -17,10 +19,38 @@ function list(v: unknown, max: number, what: string, ok: (s: string) => boolean,
   return out;
 }
 
-/** Check a config value for `key` and return it cleaned (trimmed), or an error message for the admin. */
-export function parseSourceConfig(key: ConfigKey, v: unknown): { value: Record<string, unknown> } | { error: string } {
+/**
+ * The watcher's list: only handles come from the admin. Whatever the watcher learned (resolved ids, seen videos) is kept from
+ * `current` for handles that stay, so saving the list never makes it re-resolve or re-stock.
+ */
+function parseWatch(o: Record<string, unknown>, current: unknown): { value: Record<string, unknown> } | { error: string } {
+  if (!Array.isArray(o.channels)) return { error: 'channels must be a list' };
+  if (o.channels.length > MAX_WATCH) return { error: `At most ${MAX_WATCH} channels` };
+  const cur = current && typeof current === 'object' ? (current as Record<string, unknown>) : {};
+  const old = (Array.isArray(cur.channels) ? cur.channels : []).filter((c: any) => c && typeof c.handle === 'string') as Record<string, unknown>[];
+  const channels: Record<string, unknown>[] = [];
+  const have = new Set<string>();
+  for (const x of o.channels) {
+    const h = (typeof x === 'string' ? x : x && typeof x === 'object' ? (x as Record<string, unknown>).handle : '');
+    const handle = typeof h === 'string' ? h.trim() : '';
+    if (!HANDLE.test(handle)) return { error: 'Each channel must be a handle like @TheNextNewThingAI' };
+    if (have.has(handle.toLowerCase())) continue;
+    have.add(handle.toLowerCase());
+    const prev = old.find((c) => String(c.handle).toLowerCase() === handle.toLowerCase());
+    channels.push({
+      handle,
+      ...(prev && typeof prev.channel_id === 'string' && typeof prev.uploads === 'string' ? { channel_id: prev.channel_id, uploads: prev.uploads } : {}),
+    });
+  }
+  const seen = (Array.isArray(cur.seen) ? cur.seen : []).filter((s): s is string => typeof s === 'string').slice(-300);
+  return { value: { channels, seen } };
+}
+
+/** Check a config value for `key` and return it cleaned (trimmed), or an error message for the admin. `current` is the stored value (the watch list keeps what the watcher learned). */
+export function parseSourceConfig(key: ConfigKey, v: unknown, current?: unknown): { value: Record<string, unknown> } | { error: string } {
   const o = v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
   if (!o) return { error: 'Send a JSON object' };
+  if (key === 'watch') return parseWatch(o, current);
   if (key === 'web') {
     const q = typeof o.query === 'string' ? o.query.trim() : '';
     if (!q || q.length > 300) return { error: 'query must be 1 to 300 characters' };
