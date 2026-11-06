@@ -69,6 +69,35 @@ export function shortDate(iso: string): string {
   return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(iso) ? iso.slice(0, 16).replace('T', ' ') : iso;
 }
 
+import { CHANNEL_INPUT_HINT, parseChannelInput } from '../../lib/sources/config.ts';
+
+export { CHANNEL_INPUT_HINT };
+
+/**
+ * A channel textarea, one per line, in any common form (link, @handle, handle, UC id), as the server will store it: a UC id
+ * or an @handle, repeats dropped. `bad` holds the lines that are none of those.
+ */
+export function channelEntries(text: string): { entries: string[]; bad: string[] } {
+  const entries: string[] = [];
+  const bad: string[] = [];
+  const have = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    const p = parseChannelInput(t);
+    if (!p) {
+      bad.push(t);
+      continue;
+    }
+    const c = 'handle' in p ? p.handle : p.channel_id;
+    const k = 'handle' in p ? c.toLowerCase() : c;
+    if (have.has(k)) continue;
+    have.add(k);
+    entries.push(c);
+  }
+  return { entries, bad };
+}
+
 /** A textarea as a list: one entry per line, trimmed, no blanks or repeats. */
 export const linesOf = (text: string): string[] => [...new Set(text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean))];
 
