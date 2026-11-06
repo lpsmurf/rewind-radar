@@ -104,13 +104,14 @@ describe('watchChannels', () => {
     expect((s.store.watch as any).seen).toEqual(['fresh']);
   });
 
-  it('keeps only the newest 300 seen ids', async () => {
+  // SEEN_MAX was 300; raised to 1000 so a 4 month backfill never forgets ids.
+  it('keeps only the newest 1000 seen ids', async () => {
     api([vid('n1', 72), vid('n2', 72)], {});
-    const seen = Array.from({ length: 299 }, (_, i) => `s${i}`);
+    const seen = Array.from({ length: 999 }, (_, i) => `s${i}`);
     const s = setup({ watch: { channels: [{ handle: '@Chan', channel_id: CH, uploads: UPLOADS }], seen } });
     await watchChannels(s.ctx);
     const after = (s.store.watch as any).seen as string[];
-    expect(after).toHaveLength(300);
+    expect(after).toHaveLength(1000);
     expect(after.slice(-2)).toEqual(['n1', 'n2']);
     expect(after[0]).toBe('s1');
   });
@@ -213,15 +214,96 @@ describe('watchChannels', () => {
       expect(w.channels).toEqual([{ handle: '@Other' }]);
       expect(JSON.stringify(w)).not.toContain(CH);
     });
-    it('dedupes merged seen ids and keeps the newest 300', async () => {
+    it('dedupes merged seen ids and keeps the newest 1000', async () => {
       api([vid('n1', 72)], {});
-      const cur = Array.from({ length: 300 }, (_, i) => `s${i}`);
+      const cur = Array.from({ length: 1000 }, (_, i) => `s${i}`);
       const { s } = await runWithEdit({ channels: [{ handle: '@Chan' }], seen: [] }, { channels: [{ handle: '@Chan' }], seen: [...cur, 'n1'] });
       const seen = (s.store.watch as any).seen as string[];
-      expect(seen).toHaveLength(300);
+      expect(seen).toHaveLength(1000);
       expect(seen.at(-1)).toBe('n1');
       expect(seen[0]).toBe('s1');
-      expect(new Set(seen).size).toBe(300);
+      expect(new Set(seen).size).toBe(1000);
     });
+  });
+});
+
+describe('watchChannels backfill', () => {
+  const daysAgo = (d: number) => d * 24;
+  const pages = (calls: ReturnType<typeof api>) => calls.filter((c) => c.kind === 'playlistItems');
+  /** n videos, newest first, one per day starting `from` days ago. */
+  const many = (n: number, from = 1) => Array.from({ length: n }, (_, i) => vid(`v${i + 1}`, daysAgo(from + i)));
+  const link = (ids: string[]) => Object.fromEntries(ids.map((id) => [id, [owner(`https://github.com/o/${id}`)]]));
+
+  it('keeps the 14 day window and one page of 5 by default', async () => {
+    const calls = api(many(30));
+    await watchChannels(setup().ctx);
+    expect(pages(calls)).toHaveLength(1);
+    expect(pages(calls)[0].params).toMatchObject({ maxResults: '5' });
+  });
+
+  it('pages 50 at a time with pageToken and stops once items are older than the window', async () => {
+    const calls = api(many(150)); // v1 is 1 day old, v150 150 days old
+    await watchChannels(setup().ctx, { days: 120 });
+    const p = pages(calls);
+    expect(p.map((c) => c.params.maxResults)).toEqual(['50', '50', '50']);
+    expect(p.map((c) => c.params.pageToken)).toEqual([undefined, '50', '100']); // page 3 holds v101..v150, v121+ is out of window
+  });
+
+  it('reads at most 4 pages', async () => {
+    const calls = api(many(400, 1));
+    await watchChannels(setup().ctx, { days: 180 });
+    expect(pages(calls)).toHaveLength(4);
+  });
+
+  it('processes the oldest videos first, 10 per call', async () => {
+    api(many(25, 20), link(many(25, 20).map((v) => v.id)));
+    const s = setup();
+    const r = await watchChannels(s.ctx, { days: 60 });
+    expect(r.videos_checked).toBe(10);
+    expect(s.stocked.map((x) => x.repo)).toEqual(many(25, 20).slice(-10).reverse().map((v) => `o/${v.id}`));
+    expect(r.remaining).toBe(15);
+  });
+
+  it('counts remaining down across repeated calls until 0', async () => {
+    api(many(25, 20), link(many(25, 20).map((v) => v.id)));
+    const s = setup();
+    const left: number[] = [];
+    for (let i = 0; i < 4; i++) left.push((await watchChannels(s.ctx, { days: 60 })).remaining);
+    expect(left).toEqual([15, 5, 0, 0]);
+    expect(s.stocked).toHaveLength(25);
+  });
+
+  it('clamps days to 1..180', async () => {
+    const calls = api(many(5, 1));
+    await watchChannels(setup().ctx, { days: 9999 });
+    expect(pages(calls)[0].params.maxResults).toBe('50');
+    // 1 day: only a video under a day old is in window
+    api([vid('new', 5), vid('old', 30)], { new: [owner('https://github.com/a/new')], old: [owner('https://github.com/a/old')] });
+    const s = setup();
+    await watchChannels(s.ctx, { days: -5 });
+    expect(s.stocked.map((x) => x.repo)).toEqual(['a/new']);
+    api([vid('d100', daysAgo(100))], { d100: [owner('https://github.com/a/d100')] });
+    const t = setup();
+    await watchChannels(t.ctx, { days: 1000 });
+    expect(t.stocked).toHaveLength(1);
+    api([vid('d200', daysAgo(200))], { d200: [owner('https://github.com/a/d200')] });
+    const u = setup();
+    await watchChannels(u.ctx, { days: 1000 });
+    expect(u.stocked).toHaveLength(0);
+  });
+
+  it('keeps every seen id across a 30 video backfill', async () => {
+    api(many(30, 20));
+    const s = setup();
+    for (let i = 0; i < 3; i++) await watchChannels(s.ctx, { days: 90 });
+    expect((s.store.watch as any).seen).toHaveLength(30);
+  });
+
+  it('marks old videos without links seen and reports remaining 0', async () => {
+    api(many(3, 5));
+    const s = setup();
+    const r = await watchChannels(s.ctx, { days: 30 });
+    expect(r.remaining).toBe(0);
+    expect((s.store.watch as any).seen).toHaveLength(3);
   });
 });
