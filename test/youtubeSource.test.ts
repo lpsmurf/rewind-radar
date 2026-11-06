@@ -54,6 +54,25 @@ describe('youtubeSource', () => {
     expect(vids[0].params.id.split(',').sort()).toEqual(['c1', 'q1', 'q2']);
   });
 
+  it('resolves @handles to channel ids once per run and searches by id, skipping (with a log) one that does not resolve', async () => {
+    const other = 'UC' + 'b'.repeat(22);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const calls = stubYouTube({ search: () => [], handles: { '@Known': other } });
+    await youtubeSource.run(ctx({ config: cfg({ queries: [], channels: ['@Known', CHAN, '@Known', '@Gone'] }) }));
+    const lookups = calls.filter((c) => c.kind === 'channels');
+    expect(lookups.map((c) => c.params.forHandle)).toEqual(['@Known', '@Gone']);
+    expect(lookups[0].params).toMatchObject({ part: 'id', key: 'test-key' });
+    expect(calls.filter((c) => c.kind === 'search').map((c) => c.params.channelId)).toEqual([other, CHAN]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('@Gone'));
+    warn.mockRestore();
+  });
+
+  it('makes no channels.list call when every channel is already an id', async () => {
+    const calls = stubYouTube({});
+    await youtubeSource.run(ctx({ config: cfg({ queries: [], channels: [CHAN] }) }));
+    expect(calls.filter((c) => c.kind === 'channels')).toEqual([]);
+  });
+
   it('caps queries at 5 and channels at 10', async () => {
     const calls = stubYouTube({});
     const channels = Array.from({ length: 12 }, (_, i) => 'UC' + String(i).padStart(22, 'x'));

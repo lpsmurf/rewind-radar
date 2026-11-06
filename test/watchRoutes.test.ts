@@ -71,6 +71,11 @@ describe('POST /sources/watch', () => {
     setup();
     expect(await run('s3cret')).toEqual({ status: 200, body: { ok: true, ...SUMMARY } });
   });
+  it('runs in automatic backfill mode', async () => {
+    setup();
+    await run('s3cret');
+    expect(watch.run.mock.calls[0][1]).toEqual({ auto: true });
+  });
   it('answers 202 and works on in the background when EdgeRuntime.waitUntil exists', async () => {
     setup();
     const waits: Promise<unknown>[] = [];
@@ -168,17 +173,17 @@ describe('PUT /admin/config/watch', () => {
   });
   it('400s a bad handle and writes nothing', async () => {
     const d = setup();
-    expect((await put({ channels: ['nope'] })).status).toBe(400);
+    expect((await put({ channels: ['not a channel'] })).status).toBe(400);
     expect(writes(d, 'source_config', 'upsert')).toEqual([]);
   });
 });
 
 describe('watch days', () => {
-  it('cron runs ignore a days body and use the 14 day default', async () => {
+  it('cron runs ignore a days body and use the automatic per-channel windows', async () => {
     setup();
     const r = await handle(new Request('http://localhost/api/sources/watch', { method: 'POST', headers: { 'x-cron-secret': 's3cret', 'x-forwarded-for': '10.8.0.1' }, body: JSON.stringify({ days: 120 }) }));
     expect(r.status).toBe(200);
-    expect(watch.run.mock.calls.at(-1)![1]).toBeUndefined();
+    expect(watch.run.mock.calls.at(-1)![1]).toEqual({ auto: true });
   });
 
   it('the admin run passes a days body on, and none when the body is empty or wrong', async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adminHeaders, safeHref, formatUsd, isAdminHash, isChannelId, failedLines, linesOf, pastedUrls, repoKey, stockLines, stockStatusLabel, stockSummary, spendTable, shortDate, runBackfill, backfillLine, type WatchRunResult, type BackfillTotals } from '../src/lib/adminPanel.ts';
+import { adminHeaders, safeHref, formatUsd, isAdminHash, isChannelId, channelEntries, CHANNEL_INPUT_HINT, failedLines, linesOf, pastedUrls, repoKey, stockLines, stockStatusLabel, stockSummary, spendTable, shortDate, runBackfill, backfillLine, type WatchRunResult, type BackfillTotals } from '../src/lib/adminPanel.ts';
 
 describe('isAdminHash', () => {
   it('matches #admin only', () => {
@@ -203,5 +203,22 @@ describe('runBackfill', () => {
     const r = await run([res({ remaining: 99 })], { cancelled: () => n++ >= 2 }).p;
     expect(r).toMatchObject({ stop: 'cancelled' });
     expect(r.totals.calls).toBe(2);
+  });
+});
+
+describe('channelEntries', () => {
+  const UC = 'UC' + 'a'.repeat(22);
+  it('normalises every line: UC id for ids and /channel/ links, @handle otherwise, repeats dropped', () => {
+    const r = channelEntries(` https://www.youtube.com/@Foo/videos?x=1 \n\nfoo\n${UC}\nyoutube.com/channel/${UC}\n@Bar\n`);
+    expect(r).toEqual({ entries: ['@Foo', UC, '@Bar'], bad: [] });
+  });
+  it('lists lines it does not understand', () => {
+    const r = channelEntries('@okay\nhttps://www.youtube.com/watch?v=dQw4w9WgXcQ\nhttps://www.youtube.com/c/Name\nnot a channel');
+    expect(r.entries).toEqual(['@okay']);
+    expect(r.bad).toEqual(['https://www.youtube.com/watch?v=dQw4w9WgXcQ', 'https://www.youtube.com/c/Name', 'not a channel']);
+  });
+  it('gives nothing for an empty box, and one shared message', () => {
+    expect(channelEntries('')).toEqual({ entries: [], bad: [] });
+    expect(CHANNEL_INPUT_HINT).toBe('Use a channel link, @handle or channel ID');
   });
 });

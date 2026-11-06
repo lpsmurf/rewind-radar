@@ -1,6 +1,7 @@
 import { DATA_RULE, HAIKU, sanitizeUntrusted, tool } from '../ai.ts';
 import { env } from '../env.ts';
 import { parseRepoRef } from '../github.ts';
+import { parseChannelInput } from './config.ts';
 import type { Candidate, Source, SourceCtx } from './types.ts';
 
 /**
@@ -8,8 +9,9 @@ import type { Candidate, Source, SourceCtx } from './types.ts';
  * takes GitHub links from their text in code, and asks Haiku only about promising videos with no link.
  *
  * Quota (default 10,000 units a day): search.list costs 100 units, videos.list 1 unit. At most 5 queries + 10 channels
- * = 15 searches = 1,500 units, plus at most 3 videos.list calls (50 ids each) = 3 units. About 1,500 a run, so a
- * weekly run uses 15% of one day's quota.
+ * = 15 searches = 1,500 units, plus at most 3 videos.list calls (50 ids each) = 3 units, plus one channels.list (1 unit) for
+ * each @handle among the channels (at most 10 units, resolved once per run). About 1,500 a run, so a weekly run uses 15% of
+ * one day's quota.
  */
 const MAX_QUERIES = 5;
 const MAX_CHANNELS = 10;
@@ -37,6 +39,31 @@ async function api(path: string, params: Record<string, string>): Promise<any> {
     throw new Error(`YouTube ${path} responded ${res.status}${detail ? `: ${detail}` : ''}`);
   }
   return res.json();
+}
+
+/** The channel id of each configured entry (a UC id as is, an @handle looked up with channels.list?forHandle, once per run). One that does not resolve is skipped with a log. */
+async function channelIds(entries: string[], key: string): Promise<string[]> {
+  const byHandle = new Map<string, string | null>();
+  const out: string[] = [];
+  for (const e of entries) {
+    const p = parseChannelInput(e);
+    if (!p) {
+      console.warn(`[sources] youtube: skipping channel ${e}: not a channel link, @handle or channel ID`);
+    } else if ('channel_id' in p) {
+      out.push(p.channel_id);
+    } else {
+      const h = p.handle.toLowerCase();
+      if (!byHandle.has(h)) {
+        const r = await api('channels', { part: 'id', forHandle: p.handle, key });
+        const id = r.items?.[0]?.id;
+        byHandle.set(h, typeof id === 'string' ? id : null);
+        if (typeof id !== 'string') console.warn(`[sources] youtube: skipping channel ${p.handle}: no YouTube channel found`);
+      }
+      const id = byHandle.get(h);
+      if (id) out.push(id);
+    }
+  }
+  return [...new Set(out)];
 }
 
 /** Every GitHub repo linked in `text`, as owner/repo. */
@@ -99,7 +126,7 @@ export const youtubeSource: Source = {
     }
     const cfg = (await ctx.config('youtube')) as { queries?: unknown; channels?: unknown } | null;
     const queries = strings(cfg?.queries, MAX_QUERIES);
-    const channels = strings(cfg?.channels, MAX_CHANNELS);
+    const channels = await channelIds(strings(cfg?.channels, MAX_CHANNELS), key);
     const searches = [...queries.map((q) => ({ q })), ...channels.map((channelId) => ({ channelId }))];
     if (!searches.length) return [];
 

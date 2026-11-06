@@ -298,7 +298,7 @@ function liveWatchCtx(): WatchCtx {
 }
 
 /** Run the watcher, then batch pre-assess whatever it put on the shelves (best-effort, like /admin/stock). */
-async function runWatch(opts?: { days?: number }) {
+async function runWatch(opts?: { days?: number; auto?: boolean }) {
   const stocked: string[] = [];
   const ctx = liveWatchCtx();
   const stock = ctx.stock;
@@ -649,7 +649,7 @@ export async function handle(req: Request): Promise<Response> {
   if (path === 'sources/watch' && req.method === 'POST') {
     const secret = env('CRON_SECRET');
     if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
-    const job = runWatch();
+    const job = runWatch({ auto: true }); // each channel is read back by its own backfill state
     const rt = (globalThis as any).EdgeRuntime;
     if (rt?.waitUntil) {
       rt.waitUntil(job.catch((e) => console.error('[watch]', e)));

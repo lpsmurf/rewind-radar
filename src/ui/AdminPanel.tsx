@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { API } from '../lib/api';
-import { adminHeaders, formatUsd, handlesOf, isChannelId, isHandle, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, watchSummaryLine, backfillLine, runBackfill, type SpendRow, type WatchRunResult } from '../lib/adminPanel';
+import { adminHeaders, formatUsd, channelEntries, CHANNEL_INPUT_HINT, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, watchSummaryLine, channelState, backfillLine, runBackfill, type SpendRow, type WatchRunResult } from '../lib/adminPanel';
 
 const KEY = 'rr-admin-token'; // sessionStorage only: gone when the tab closes
 type Tab = 'queue' | 'add' | 'spend' | 'runs' | 'config';
@@ -251,7 +251,7 @@ function Config({ token, fail }: TabProps) {
   const [web, loadWeb] = useLoad<{ value: { query?: string } | null }>(token, 'admin/config/web', fail);
   const [queries, setQueries] = useState('');
   const [channels, setChannels] = useState('');
-  const [watch, loadWatch] = useLoad<{ value: { channels?: { handle: string }[] } | null }>(token, 'admin/config/watch', fail);
+  const [watch, loadWatch] = useLoad<{ value: { channels?: { handle?: string; channel_id?: string; backfilled_at?: string; backfill_left?: number }[] } | null }>(token, 'admin/config/watch', fail);
   const [query, setQuery] = useState('');
   const [handles, setHandles] = useState('');
   const [msg, setMsg] = useState('');
@@ -262,7 +262,7 @@ function Config({ token, fail }: TabProps) {
   const [backNote, setBackNote] = useState('');
   const stopBackfill = useRef(false);
   useEffect(() => {
-    if (watch) setHandles((watch.value?.channels ?? []).map((c) => c.handle).join('\n'));
+    if (watch) setHandles((watch.value?.channels ?? []).map((c) => c.handle ?? c.channel_id ?? '').join('\n'));
   }, [watch]);
   useEffect(() => {
     if (yt) {
@@ -319,26 +319,29 @@ function Config({ token, fail }: TabProps) {
     setBackfilling(false);
   };
   if (!yt || !web || !watch) return <p className="small">Loading...</p>;
-  const hs = handlesOf(handles);
-  const badHandles = hs.filter((h) => !isHandle(h));
+  const { entries: hs, bad: badHandles } = channelEntries(handles);
   const qs = linesOf(queries);
-  const chs = linesOf(channels);
-  const badChannels = chs.filter((c) => !isChannelId(c));
+  const { entries: chs, bad: badChannels } = channelEntries(channels);
   return (
     <>
       <h3>YOUTUBE</h3>
       <label>QUERIES (one per line, max 5, 100 characters each)<textarea rows={4} value={queries} onChange={(e) => setQueries(e.target.value)} /></label>
-      <label>CHANNEL IDS (one per line, max 10, like UCxxxxxxxxxxxxxxxxxxxxxx)<textarea rows={4} value={channels} onChange={(e) => setChannels(e.target.value)} /></label>
-      {badChannels.length > 0 && <p className="err">Not a channel id: {badChannels.join(', ')}</p>}
+      <label>CHANNELS (one per line, max 10: channel link, @handle or channel ID)<textarea rows={4} placeholder="channel link, @handle or channel ID" value={channels} onChange={(e) => setChannels(e.target.value)} /></label>
+      {badChannels.length > 0 && <p className="err">{CHANNEL_INPUT_HINT}: {badChannels.join(', ')}</p>}
       <button className="btn" disabled={qs.length > 5 || chs.length > 10 || badChannels.length > 0 || qs.length + chs.length === 0 || qs.some((q) => q.length > 100)} onClick={() => save('youtube', { queries: qs, channels: chs }, loadYt)}>SAVE YOUTUBE</button>
       <h3>WEB SEARCH</h3>
       <label>WEEKLY QUERY (max 300 characters)<input value={query} maxLength={300} onChange={(e) => setQuery(e.target.value)} /></label>
       <button className="btn" disabled={!query.trim()} onClick={() => save('web', { query: query.trim() }, loadWeb)}>SAVE WEB</button>
       <h3>WATCHED CHANNELS</h3>
-      <label>HANDLES (one per line, max 10, like @TheNextNewThingAI). New uploads are checked every 3 hours: repos the channel lists in its own comments go on the shelves.<textarea rows={3} value={handles} onChange={(e) => setHandles(e.target.value)} /></label>
-      {badHandles.length > 0 && <p className="err">Not a handle: {badHandles.join(', ')}</p>}
+      <label>CHANNELS (one per line, max 10: channel link, @handle or channel ID). New uploads are checked every 3 hours: repos the channel lists in its own comments go on the shelves.<textarea rows={3} placeholder="channel link, @handle or channel ID" value={handles} onChange={(e) => setHandles(e.target.value)} /></label>
+      {badHandles.length > 0 && <p className="err">{CHANNEL_INPUT_HINT}: {badHandles.join(', ')}</p>}
+      {(watch.value?.channels ?? []).length > 0 && (
+        <ul className="small">
+          {(watch.value?.channels ?? []).map((c) => <li key={c.handle ?? c.channel_id}>{c.handle ?? c.channel_id}: {channelState(c)}</li>)}
+        </ul>
+      )}
       <div className="row">
-        <button className="btn" disabled={hs.length > 10 || badHandles.length > 0} onClick={() => save('watch', { channels: hs.map((handle) => ({ handle })) }, loadWatch)}>SAVE CHANNELS</button>
+        <button className="btn" disabled={hs.length > 10 || badHandles.length > 0} onClick={() => save('watch', { channels: hs }, loadWatch)}>SAVE CHANNELS</button>
         <button className="btn alt" disabled={running} onClick={runWatcher}>{running ? 'RUNNING...' : 'RUN WATCHER NOW'}</button>
       </div>
       <div className="row">

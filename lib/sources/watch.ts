@@ -5,8 +5,8 @@ import { parseRepoRef } from '../github.ts';
  * Channel watcher: for each channel in source_config 'watch', find uploads from the last 14 days we have not processed, read the
  * comments the channel itself wrote (creators list their repos there) plus the description, and stock every GitHub repo linked.
  *
- * Quota (YouTube Data API v3, 10,000 units a day, every call below is 1 unit): channels.list once per channel ever (handle
- * resolution is cached), playlistItems.list once per channel per run, commentThreads.list once per new video. A run over one channel
+ * Quota (YouTube Data API v3, 10,000 units a day, every call below is 1 unit): channels.list once per channel ever (resolving a
+ * handle with forHandle, or a channel id with id, is cached), playlistItems.list once per channel per run, commentThreads.list once per new video. A run over one channel
  * with one new video is 2 units (3 the first time); a 3-hourly schedule is about 8 to 24 units a day.
  */
 const API = 'https://www.googleapis.com/youtube/v3';
@@ -17,13 +17,23 @@ const PAGE_MAX = 4; // playlist pages read per channel in a backfill (50 videos 
 const VIDEOS_PER_RUN = 10;
 const FRESH_MS = 48 * 3_600_000;
 const SEEN_MAX = 1000; // a 4 month backfill of a busy channel must not forget ids and start over
-const RUN_CAP = 25; // repos stocked per run
+const RUN_CAP = 25; // repos stocked per batch
+// While a channel is backfilling, the cron run chains batches of VIDEOS_PER_RUN within these limits (Edge Functions are cut off at 150 s).
+const AUTO_MAX_VIDEOS = 40;
+const AUTO_MAX_REPOS = 60;
+const AUTO_MAX_MS = 100_000;
 const MAX_CHANNELS = 10;
+export const AUTO_BACKFILL_DAYS = 120; // a channel without backfilled_at is read this far back on the cron path
 
 export interface WatchChannel {
-  handle: string;
+  /** Either a handle or a channel_id names the channel; the watcher fills in the rest. */
+  handle?: string;
   channel_id?: string;
   uploads?: string;
+  /** ISO time its first-time backfill finished; without it the cron path reads AUTO_BACKFILL_DAYS back. */
+  backfilled_at?: string;
+  /** In-window videos still to do while backfilling (informational, for the admin). */
+  backfill_left?: number;
 }
 export interface WatchConfig {
   channels: WatchChannel[];
@@ -43,6 +53,8 @@ export interface WatchCtx {
   stock: (repo: string, credit: { url: string; title: string }) => Promise<StockResult>;
   logRun: (row: { found: number; queued: number; cost_usd: number; error?: string }) => Promise<void>;
   now: Date;
+  /** Milliseconds clock for the wall-time limit of a backfill run (tests pass their own); defaults to Date.now. */
+  clock?: () => number;
 }
 export interface WatchSummary {
   channels: number;
@@ -110,51 +122,106 @@ async function ownerComments(videoId: string, channelId: string, key: string): P
   return out.join('\n');
 }
 
+const label = (c: WatchChannel): string => c.handle ?? c.channel_id ?? '';
+const keyOf = (c: WatchChannel): string => (c.handle ? `h:${c.handle.toLowerCase()}` : `c:${c.channel_id}`);
+
 const asConfig = (v: unknown): WatchConfig => {
   const o = v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
   const channels = (Array.isArray(o.channels) ? o.channels : [])
-    .filter((c: any) => c && typeof c.handle === 'string' && c.handle)
+    .filter((c: any) => c && ((typeof c.handle === 'string' && c.handle) || (typeof c.channel_id === 'string' && c.channel_id)))
     .slice(0, MAX_CHANNELS)
-    .map((c: any): WatchChannel => ({ handle: c.handle, ...(typeof c.channel_id === 'string' ? { channel_id: c.channel_id } : {}), ...(typeof c.uploads === 'string' ? { uploads: c.uploads } : {}) }));
+    .map((c: any): WatchChannel => ({ ...(typeof c.handle === 'string' && c.handle ? { handle: c.handle } : {}), ...(typeof c.channel_id === 'string' ? { channel_id: c.channel_id } : {}), ...(typeof c.uploads === 'string' ? { uploads: c.uploads } : {}), ...(typeof c.backfilled_at === 'string' ? { backfilled_at: c.backfilled_at } : {}), ...(typeof c.backfill_left === 'number' ? { backfill_left: c.backfill_left } : {}) }));
   return { channels, seen: (Array.isArray(o.seen) ? o.seen : []).filter((s): s is string => typeof s === 'string') };
 };
 
-export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {}): Promise<WatchSummary> {
+interface PassLimits {
+  videos: number;
+  repos: number;
+}
+interface Pass {
+  sum: WatchSummary;
+  /** Nothing to do (no key, no channels): no run row is logged. */
+  idle: boolean;
+  /** Some channel is still in its first-time backfill after this batch. */
+  backfilling: boolean;
+  stocked: number;
+  messages: string[];
+}
+
+/**
+ * The cron run (auto: true): one batch, or while any channel is backfilling, batches of 10 videos until nothing is left, 40 videos,
+ * 60 repos, the AI budget or 100 s of wall time. An explicit run (admin) is one batch. One source_runs row per run.
+ */
+export async function watchChannels(ctx: WatchCtx, opts: { days?: number; auto?: boolean } = {}): Promise<WatchSummary> {
+  const clock = ctx.clock ?? Date.now;
+  const start = clock();
+  let p = await watchBatch(ctx, opts, { videos: VIDEOS_PER_RUN, repos: RUN_CAP });
+  if (p.idle) return p.sum;
+  const total = p.sum;
+  let stocked = p.stocked;
+  const messages = [...p.messages];
+  while (opts.auto && p.backfilling && p.sum.remaining > 0 && p.sum.videos_checked > 0 && !p.sum.skipped && total.videos_checked < AUTO_MAX_VIDEOS && stocked < AUTO_MAX_REPOS && clock() - start < AUTO_MAX_MS) {
+    p = await watchBatch(ctx, opts, { videos: Math.min(VIDEOS_PER_RUN, AUTO_MAX_VIDEOS - total.videos_checked), repos: Math.min(RUN_CAP, AUTO_MAX_REPOS - stocked) });
+    for (const k of ['videos_checked', 'repos_found', 'added', 'restored', 'duplicates', 'errors', 'not_found', 'cost_usd'] as const) total[k] += p.sum[k];
+    total.remaining = p.sum.remaining;
+    if (p.sum.skipped) total.skipped = p.sum.skipped;
+    stocked += p.stocked;
+    messages.push(...p.messages);
+  }
+  if (messages.length) total.messages = messages;
+  try {
+    await ctx.logRun({ found: total.repos_found, queued: total.added + total.restored, cost_usd: total.cost_usd, error: messages.length ? messages.join('; ').slice(0, 500) : undefined });
+  } catch (e) {
+    console.warn('[watch] could not log the run', e);
+  }
+  return total;
+}
+
+async function watchBatch(ctx: WatchCtx, opts: { days?: number; auto?: boolean }, limits: PassLimits): Promise<Pass> {
   const days = typeof opts.days === 'number' && Number.isFinite(opts.days) ? Math.min(MAX_DAYS, Math.max(1, Math.floor(opts.days))) : DEFAULT_DAYS;
-  const windowMs = days * DAY_MS;
+  /** The cron path (auto) reads each channel back by its own state; an explicit run reads every channel `days` back. */
+  const daysFor = (c: WatchChannel): number => (opts.auto ? (c.backfilled_at ? DEFAULT_DAYS : AUTO_BACKFILL_DAYS) : days);
   const sum: WatchSummary = { channels: 0, videos_checked: 0, repos_found: 0, added: 0, restored: 0, duplicates: 0, errors: 0, not_found: 0, cost_usd: 0, remaining: 0 };
   const key = env('YOUTUBE_API_KEY');
-  if (!key) return { ...sum, skipped: 'YOUTUBE_API_KEY is not set' };
+  const idle = (): Pass => ({ sum, idle: true, backfilling: false, stocked: 0, messages: [] });
+  if (!key) return { ...idle(), sum: { ...sum, skipped: 'YOUTUBE_API_KEY is not set' } };
   const cfg = asConfig(await ctx.config('watch'));
   sum.channels = cfg.channels.length;
-  if (!cfg.channels.length) return sum;
+  if (!cfg.channels.length) return idle();
 
   const messages: string[] = [];
   const done: string[] = [];
   let stocked = 0;
   let checked = 0;
   let pending = 0; // in-window videos left unprocessed
+  const finished = new Set<string>(); // auto: channels read without error whose window has nothing left
+  const left = new Map<string, number>(); // auto: in-window videos left per backfilling channel
   let halted = false; // budget spent or cap reached: no more videos this run
   try {
     for (const ch of cfg.channels) {
       if (halted) break;
+      const chDays = daysFor(ch);
+      const windowMs = chDays * DAY_MS;
+      let chPending = 0;
       try {
         if (!ch.channel_id || !ch.uploads) {
-          const r = await api('channels', { part: 'id,contentDetails', forHandle: ch.handle, key });
+          const r = ch.handle
+            ? await api('channels', { part: 'id,contentDetails', forHandle: ch.handle, key })
+            : await api('channels', { part: 'contentDetails', id: ch.channel_id!, key });
           const item = r.items?.[0];
           const uploads = item?.contentDetails?.relatedPlaylists?.uploads;
-          if (typeof item?.id !== 'string' || typeof uploads !== 'string') throw new Error(`no YouTube channel for ${ch.handle}`);
+          if (typeof item?.id !== 'string' || typeof uploads !== 'string') throw new Error(`no YouTube channel for ${label(ch)}`);
           ch.channel_id = item.id;
           ch.uploads = uploads;
         }
         // A backfill pages through the uploads (newest first) until the window ends; the usual run reads the latest 5.
         const found: any[] = [];
         let pageToken: string | undefined;
-        for (let page = 0; page < (days > DEFAULT_DAYS ? PAGE_MAX : 1); page++) {
+        for (let page = 0; page < (chDays > DEFAULT_DAYS ? PAGE_MAX : 1); page++) {
           const list = await api('playlistItems', {
             part: 'contentDetails,snippet',
             playlistId: ch.uploads!,
-            maxResults: days > DEFAULT_DAYS ? '50' : '5',
+            maxResults: chDays > DEFAULT_DAYS ? '50' : '5',
             ...(pageToken ? { pageToken } : {}),
             key,
           });
@@ -171,8 +238,9 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
         }
         found.sort((x, y) => x.published - y.published); // oldest first: a backfill advances chronologically
         for (const { it, id, published } of found) {
-          if (halted || checked >= VIDEOS_PER_RUN) {
+          if (halted || checked >= limits.videos) {
             pending++;
+            chPending++;
             continue;
           }
           const age = ctx.now.getTime() - published;
@@ -180,12 +248,13 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
             halted = true;
             sum.skipped = 'AI budget spent, will retry';
             pending++;
+            chPending++;
             continue;
           }
           checked++;
           sum.videos_checked++;
           const title = String(it.snippet?.title ?? '');
-          const channelTitle = String(it.snippet?.videoOwnerChannelTitle ?? it.snippet?.channelTitle ?? ch.handle);
+          const channelTitle = String(it.snippet?.videoOwnerChannelTitle ?? it.snippet?.channelTitle ?? label(ch));
           const commentText = await ownerComments(id, ch.channel_id!, key);
           const comments = watchRepoLinks(commentText);
           const repos = watchRepoLinks(`${commentText}\n${String(it.snippet?.description ?? '')}`);
@@ -193,10 +262,10 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
           const credit = { url: `https://www.youtube.com/watch?v=${id}`, title: `${title} · ${channelTitle}`.slice(0, 200) };
           let complete = true;
           for (const repo of repos) {
-            if (stocked >= RUN_CAP || !(await ctx.budget())) {
+            if (stocked >= limits.repos || !(await ctx.budget())) {
               halted = true;
               complete = false;
-              if (stocked < RUN_CAP) sum.skipped = 'AI budget spent, will retry';
+              if (stocked < limits.repos) sum.skipped = 'AI budget spent, will retry';
               break;
             }
             stocked++;
@@ -214,21 +283,34 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
           }
           // Creators often pin the list hours after uploading: a fresh video with no owner link yet is retried next run.
           if (complete && (comments.length > 0 || age > FRESH_MS)) done.push(id);
-          else pending++;
+          else {
+            pending++;
+            chPending++;
+          }
+        }
+        if (opts.auto && !ch.backfilled_at) {
+          if (chPending === 0) finished.add(keyOf(ch));
+          else left.set(keyOf(ch), chPending);
         }
       } catch (e) {
         sum.errors++;
-        messages.push(`${ch.handle}: ${e instanceof Error ? e.message : e}`);
+        messages.push(`${label(ch)}: ${e instanceof Error ? e.message : e}`);
       }
     }
   } finally {
     // The admin may have edited the list while we ran: merge into the row as it is now, never write back the list we started with.
     try {
       const now = asConfig(await ctx.config('watch'));
-      const ids = new Map(cfg.channels.filter((c) => c.channel_id && c.uploads).map((c) => [c.handle.toLowerCase(), c]));
+      const ids = new Map(cfg.channels.filter((c) => c.channel_id && c.uploads).map((c) => [keyOf(c), c]));
       const channels = now.channels.map((c) => {
-        const r = ids.get(c.handle.toLowerCase());
-        return c.channel_id && c.uploads ? c : r ? { ...c, channel_id: r.channel_id, uploads: r.uploads } : c;
+        const r = ids.get(keyOf(c));
+        let out = c.channel_id && c.uploads ? c : r ? { ...c, channel_id: r.channel_id, uploads: r.uploads } : c;
+        // Only entries still in the list and not yet backfilled change state: done, or how many videos are left.
+        if (!out.backfilled_at && finished.has(keyOf(out))) {
+          const { backfill_left: _gone, ...rest } = out;
+          out = { ...rest, backfilled_at: ctx.now.toISOString() };
+        } else if (!out.backfilled_at && left.has(keyOf(out))) out = { ...out, backfill_left: left.get(keyOf(out)) };
+        return out;
       });
       const seen = [...new Set([...now.seen, ...done])].slice(-SEEN_MAX);
       await ctx.saveConfig('watch', { channels, seen });
@@ -238,11 +320,6 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
     }
   }
   sum.remaining = pending;
-  if (messages.length) sum.messages = messages;
-  try {
-    await ctx.logRun({ found: sum.repos_found, queued: sum.added + sum.restored, cost_usd: sum.cost_usd, error: messages.length ? messages.join('; ').slice(0, 500) : undefined });
-  } catch (e) {
-    console.warn('[watch] could not log the run', e);
-  }
-  return sum;
+  const backfilling = !!opts.auto && cfg.channels.some((c) => !c.backfilled_at && !finished.has(keyOf(c)));
+  return { sum, idle: false, backfilling, stocked, messages };
 }

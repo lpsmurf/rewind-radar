@@ -9,10 +9,10 @@ export interface Vid {
 
 /**
  * Stub fetch for the YouTube Data API. `search(params)` returns the video ids one search.list call finds
- * (params = its query string as an object); `videos` is every video videos.list can describe. `fail` makes every call answer that status.
+ * (params = its query string as an object); `videos` is every video videos.list can describe; `handles` maps a handle to its channel id for channels.list?forHandle. `fail` makes every call answer that status.
  */
-export function stubYouTube(o: { search?: (p: Record<string, string>) => string[]; videos?: Vid[]; fail?: number }) {
-  const calls: { kind: 'search' | 'videos'; params: Record<string, string> }[] = [];
+export function stubYouTube(o: { search?: (p: Record<string, string>) => string[]; videos?: Vid[]; handles?: Record<string, string>; fail?: number }) {
+  const calls: { kind: 'search' | 'videos' | 'channels'; params: Record<string, string> }[] = [];
   vi.stubGlobal('fetch', async (input: unknown) => {
     const u = new URL(String(input));
     const params = Object.fromEntries(u.searchParams);
@@ -20,6 +20,11 @@ export function stubYouTube(o: { search?: (p: Record<string, string>) => string[
     if (u.pathname.endsWith('/search')) {
       calls.push({ kind: 'search', params });
       return new Response(JSON.stringify({ items: (o.search?.(params) ?? []).map((id) => ({ id: { videoId: id } })) }));
+    }
+    if (u.pathname.endsWith('/channels')) {
+      calls.push({ kind: 'channels', params });
+      const id = o.handles?.[params.forHandle];
+      return new Response(JSON.stringify({ items: id ? [{ id }] : [] }));
     }
     if (u.pathname.endsWith('/videos')) {
       calls.push({ kind: 'videos', params });
@@ -48,7 +53,7 @@ export interface WatchThread {
 }
 
 /**
- * Stub fetch for the channel watcher: channels.list (forHandle), playlistItems.list and commentThreads.list.
+ * Stub fetch for the channel watcher: channels.list (forHandle or id), playlistItems.list and commentThreads.list.
  * `handles` maps a handle to its channel id; the uploads playlist of channel `UCx` is `UUx`. `uploads` maps a playlist id to its videos,
  * `threads` a video id to its comment threads. playlistItems pages by `maxResults` and `pageToken` (an offset) and sets `nextPageToken`, newest video first as listed. `fail(kind, params)` returns an HTTP status to make that call fail.
  */
@@ -72,7 +77,8 @@ export function stubWatchApi(o: {
       return new Response(JSON.stringify({ error: { message: 'boom', errors: [{ reason }] } }), { status: code });
     }
     if (kind === 'channels') {
-      const id = o.handles?.[params.forHandle];
+      // forHandle looks a handle up; id (part=contentDetails) looks a channel id up
+      const id = params.id ? (Object.values(o.handles ?? {}).includes(params.id) ? params.id : undefined) : o.handles?.[params.forHandle];
       return new Response(JSON.stringify({ items: id ? [{ id, contentDetails: { relatedPlaylists: { uploads: 'UU' + id.slice(2) } } }] : [] }));
     }
     if (kind === 'playlistItems') {
