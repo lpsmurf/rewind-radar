@@ -187,4 +187,41 @@ describe('watchChannels', () => {
     expect((await watchChannels(quota.ctx)).errors).toBe(1);
     expect((quota.store.watch as any).seen).toEqual([]);
   });
+
+  describe('saving while the admin edits', () => {
+    const resolved = { handle: '@Chan', channel_id: CH, uploads: UPLOADS };
+    /** Run with `edit` applied to the stored config in the middle of the run (at the first playlist call). */
+    const runWithEdit = async (start: unknown, edit: unknown) => {
+      const s = setup({ watch: start });
+      const real = s.ctx.config;
+      let reads = 0;
+      s.ctx.config = async (k) => (++reads === 2 ? edit : real(k)); // the second read is the re-read at the end
+      const r = await watchChannels(s.ctx);
+      return { s, r };
+    };
+    it('keeps a handle the admin added mid-run, and the seen ids from both sides', async () => {
+      api([vid('n1', 72)], {});
+      const { s } = await runWithEdit({ channels: [{ handle: '@Chan' }], seen: ['old'] }, { channels: [{ handle: '@Chan' }, { handle: '@Added' }], seen: ['old', 'adminseen'] });
+      const w = s.store.watch as any;
+      expect(w.channels).toEqual([resolved, { handle: '@Added' }]);
+      expect(w.seen).toEqual(['old', 'adminseen', 'n1']);
+    });
+    it('does not bring back a handle the admin removed mid-run, nor its resolved ids', async () => {
+      api([vid('n1', 72)], {});
+      const { s } = await runWithEdit({ channels: [{ handle: '@Chan' }], seen: [] }, { channels: [{ handle: '@Other' }], seen: [] });
+      const w = s.store.watch as any;
+      expect(w.channels).toEqual([{ handle: '@Other' }]);
+      expect(JSON.stringify(w)).not.toContain(CH);
+    });
+    it('dedupes merged seen ids and keeps the newest 300', async () => {
+      api([vid('n1', 72)], {});
+      const cur = Array.from({ length: 300 }, (_, i) => `s${i}`);
+      const { s } = await runWithEdit({ channels: [{ handle: '@Chan' }], seen: [] }, { channels: [{ handle: '@Chan' }], seen: [...cur, 'n1'] });
+      const seen = (s.store.watch as any).seen as string[];
+      expect(seen).toHaveLength(300);
+      expect(seen.at(-1)).toBe('n1');
+      expect(seen[0]).toBe('s1');
+      expect(new Set(seen).size).toBe(300);
+    });
+  });
 });
