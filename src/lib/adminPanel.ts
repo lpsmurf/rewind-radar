@@ -97,3 +97,62 @@ export function watchSummaryLine(r: { skipped?: string; channels: number; videos
   if (r.skipped) return `Skipped: ${r.skipped}`;
   return `${r.channels} channel${r.channels === 1 ? '' : 's'} · ${r.videos_checked} new video${r.videos_checked === 1 ? '' : 's'} · ${r.repos_found} repos found · added ${r.added} · restored ${r.restored} · already in store ${r.duplicates}${r.errors ? ` · ${r.errors} error${r.errors === 1 ? '' : 's'}` : ''}`;
 }
+
+export interface WatchRunResult {
+  videos_checked: number;
+  added: number;
+  restored: number;
+  duplicates: number;
+  errors: number;
+  remaining: number;
+  skipped?: string;
+}
+export interface BackfillTotals { added: number; restored: number; duplicates: number; errors: number; videos: number; remaining: number; calls: number }
+export type BackfillStop = 'done' | 'error' | 'skipped' | 'stalled' | 'limit' | 'cancelled';
+export interface BackfillOutcome { stop: BackfillStop; totals: BackfillTotals; reason?: string }
+
+/** The live progress line of a backfill, like "videos left: 7 · added 23 · already in store 9 · restored 1". */
+export const backfillLine = (t: BackfillTotals): string => `videos left: ${t.remaining} · added ${t.added} · already in store ${t.duplicates} · restored ${t.restored}${t.errors ? ` · ${t.errors} error${t.errors === 1 ? '' : 's'}` : ''}`;
+
+/**
+ * Call the watcher again and again until nothing is left. Stops when `remaining` reaches 0, on a thrown error (budget 503 included),
+ * when the watcher says it skipped (budget spent), when a call checked no video yet some remain (a fresh video still waiting for its
+ * pinned comment: more calls will not help), after `maxCalls`, or when `cancelled()` turns true.
+ */
+export async function runBackfill(o: {
+  days: number;
+  call: (days: number) => Promise<WatchRunResult>;
+  onProgress?: (t: BackfillTotals) => void;
+  cancelled?: () => boolean;
+  sleep?: (ms: number) => Promise<void>;
+  maxCalls?: number;
+  pauseMs?: number;
+}): Promise<BackfillOutcome> {
+  const maxCalls = o.maxCalls ?? 30;
+  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const t: BackfillTotals = { added: 0, restored: 0, duplicates: 0, errors: 0, videos: 0, remaining: 0, calls: 0 };
+  const out = (stop: BackfillStop, reason?: string): BackfillOutcome => ({ stop, totals: { ...t }, ...(reason ? { reason } : {}) });
+  while (t.calls < maxCalls) {
+    if (o.cancelled?.()) return out('cancelled');
+    let r: WatchRunResult;
+    try {
+      r = await o.call(o.days);
+    } catch (e) {
+      return out('error', e instanceof Error ? e.message : 'Failed');
+    }
+    t.calls++;
+    t.added += r.added;
+    t.restored += r.restored;
+    t.duplicates += r.duplicates;
+    t.errors += r.errors;
+    t.videos += r.videos_checked;
+    t.remaining = r.remaining;
+    o.onProgress?.({ ...t });
+    if (r.skipped) return out('skipped', r.skipped);
+    if (r.remaining <= 0) return out('done');
+    if (r.videos_checked === 0) return out('stalled', 'No video could be processed yet (new uploads wait for the channel to pin its list).');
+    if (t.calls >= maxCalls) break;
+    await sleep(o.pauseMs ?? 1500);
+  }
+  return out('limit', `Stopped after ${maxCalls} calls.`);
+}

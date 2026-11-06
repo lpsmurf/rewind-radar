@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { API } from '../lib/api';
-import { adminHeaders, formatUsd, handlesOf, isChannelId, isHandle, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, watchSummaryLine, type SpendRow } from '../lib/adminPanel';
+import { adminHeaders, formatUsd, handlesOf, isChannelId, isHandle, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, watchSummaryLine, backfillLine, runBackfill, type SpendRow, type WatchRunResult } from '../lib/adminPanel';
 
 const KEY = 'rr-admin-token'; // sessionStorage only: gone when the tab closes
 type Tab = 'queue' | 'add' | 'spend' | 'runs' | 'config';
@@ -257,6 +257,10 @@ function Config({ token, fail }: TabProps) {
   const [msg, setMsg] = useState('');
   const [running, setRunning] = useState(false);
   const [runNote, setRunNote] = useState('');
+  const [backDays, setBackDays] = useState('120');
+  const [backfilling, setBackfilling] = useState(false);
+  const [backNote, setBackNote] = useState('');
+  const stopBackfill = useRef(false);
   useEffect(() => {
     if (watch) setHandles((watch.value?.channels ?? []).map((c) => c.handle).join('\n'));
   }, [watch]);
@@ -292,6 +296,28 @@ function Config({ token, fail }: TabProps) {
     }
     setRunning(false);
   };
+  const backfill = async () => {
+    const days = Math.min(180, Math.max(1, Math.floor(Number(backDays)) || 120));
+    setBackDays(String(days));
+    stopBackfill.current = false;
+    setBackfilling(true);
+    setBackNote('Starting...');
+    try {
+      const out = await runBackfill({
+        days,
+        call: (d) => api<WatchRunResult>(token, 'admin/watch/run', { days: d }),
+        onProgress: (t) => setBackNote(`${backfillLine(t)} · call ${t.calls}`),
+        cancelled: () => stopBackfill.current,
+      });
+      const head = { done: 'Done.', cancelled: 'Stopped.', error: 'Stopped on an error:', skipped: 'Stopped:', stalled: 'Stopped:', limit: 'Stopped:' }[out.stop];
+      setBackNote(`${head} ${out.reason ? `${out.reason} ` : ''}${backfillLine(out.totals)}`);
+      loadWatch();
+    } catch (e) {
+      if (e instanceof Forbidden) fail(e);
+      else setBackNote(e instanceof Error ? e.message : 'Failed');
+    }
+    setBackfilling(false);
+  };
   if (!yt || !web || !watch) return <p className="small">Loading...</p>;
   const hs = handlesOf(handles);
   const badHandles = hs.filter((h) => !isHandle(h));
@@ -315,6 +341,12 @@ function Config({ token, fail }: TabProps) {
         <button className="btn" disabled={hs.length > 10 || badHandles.length > 0} onClick={() => save('watch', { channels: hs.map((handle) => ({ handle })) }, loadWatch)}>SAVE CHANNELS</button>
         <button className="btn alt" disabled={running} onClick={runWatcher}>{running ? 'RUNNING...' : 'RUN WATCHER NOW'}</button>
       </div>
+      <div className="row">
+        <label>BACKFILL LAST <input type="number" min={1} max={180} value={backDays} disabled={backfilling} onChange={(e) => setBackDays(e.target.value)} style={{ width: '5em' }} /> DAYS</label>
+        <button className="btn alt" disabled={backfilling || running} onClick={backfill}>{backfilling ? 'BACKFILLING...' : 'BACKFILL'}</button>
+        {backfilling && <button className="btn" onClick={() => { stopBackfill.current = true; }}>STOP</button>}
+      </div>
+      {backNote && <p className="small">{backNote}</p>}
       {runNote && <p className="small">{runNote}</p>}
       {msg && <p className="small">{msg}</p>}
     </>
