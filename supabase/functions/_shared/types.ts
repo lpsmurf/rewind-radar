@@ -20,6 +20,8 @@ export type Aisle = Genre | 'new' | 'community' | 'counter' | 'entrance' | 'arca
 
 /** The rooms of the store. 'store' is the SKILLS room (the name stays for old clients' presence). */
 export type Room = 'store' | 'repos' | 'arcade';
+/** Where a new visitor starts: the REPOS room is the entrance. */
+export const DEFAULT_ROOM: Room = 'repos';
 
 export interface Tape {
   id: string;

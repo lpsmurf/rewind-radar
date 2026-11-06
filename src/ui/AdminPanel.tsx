@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { API } from '../lib/api';
-import { adminHeaders, formatUsd, isChannelId, linesOf, pastedUrls, safeHref, shortDate, spendTable, type SpendRow } from '../lib/adminPanel';
+import { adminHeaders, formatUsd, isChannelId, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, type SpendRow } from '../lib/adminPanel';
 
 const KEY = 'rr-admin-token'; // sessionStorage only: gone when the tab closes
-type Tab = 'queue' | 'paste' | 'spend' | 'runs' | 'config';
+type Tab = 'queue' | 'add' | 'spend' | 'runs' | 'config';
 interface QueueItem { id: number; source: string; repo: string; title: string; why: string; credit_url: string; credit_title: string; credit_author: string; at: string; facts?: { stars?: number } | null }
 interface Run { id: number; at: string; source: string; found: number; queued: number; cost_usd: number | string; error: string | null }
 
@@ -59,8 +59,8 @@ export default function AdminPanel() {
       <header>
         <h1>ADMIN</h1>
         <div className="row">
-          {(['queue', 'paste', 'spend', 'runs', 'config'] as Tab[]).map((t) => (
-            <button key={t} className={t === tab ? 'btn' : 'btn alt'} onClick={() => { setTab(t); setErr(''); }}>{t.toUpperCase()}</button>
+          {(['queue', 'add', 'spend', 'runs', 'config'] as Tab[]).map((t) => (
+            <button key={t} className={t === tab ? 'btn' : 'btn alt'} onClick={() => { setTab(t); setErr(''); }}>{t === 'add' ? 'ADD REPOS' : t.toUpperCase()}</button>
           ))}
           <button className="btn alt" onClick={() => signOut()}>SIGN OUT</button>
           <a className="btn alt" href="#">STORE</a>
@@ -69,7 +69,7 @@ export default function AdminPanel() {
       <main className="panel">
         {err && <p className="err">{err}</p>}
         {tab === 'queue' && <Queue token={token} fail={fail} />}
-        {tab === 'paste' && <Paste token={token} fail={fail} />}
+        {tab === 'add' && <AddRepos token={token} fail={fail} />}
         {tab === 'spend' && <Spend token={token} fail={fail} />}
         {tab === 'runs' && <Runs token={token} fail={fail} />}
         {tab === 'config' && <Config token={token} fail={fail} />}
@@ -135,31 +135,65 @@ function Queue({ token, fail }: TabProps) {
   );
 }
 
-function Paste({ token, fail }: TabProps) {
+interface StockResult { input: string; repo?: string; status: string; slug?: string; genre?: string; message?: string }
+
+function AddRepos({ token, fail }: TabProps) {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState('');
-  const urls = pastedUrls(text);
-  const go = async () => {
+  const [results, setResults] = useState<StockResult[]>([]);
+  const lines = stockLines(text);
+  const tooMany = lines.length > 20;
+  const run = async (fn: () => Promise<void>) => {
     setBusy(true);
     setMsg('');
     try {
-      const r = await api<{ found: number; queued: number; ignored: number }>(token, 'admin/paste', { urls });
-      setMsg(`Found ${r.found}, queued ${r.queued} (already known or not on GitHub: ${r.found - r.queued}), ignored ${r.ignored} that were not repo links.`);
-      setText('');
+      await fn();
     } catch (e) {
       if (e instanceof Forbidden) fail(e);
       else setMsg(e instanceof Error ? e.message : 'Failed');
     }
     setBusy(false);
   };
+  const add = () =>
+    run(async () => {
+      const r = await api<{ results: StockResult[]; added: number; skipped: number }>(token, 'admin/stock', { urls: lines });
+      setResults(r.results);
+      setMsg(stockSummary(r));
+      setText(failedLines(r.results).join('\n')); // only what failed stays, to fix and retry
+    });
+  const queue = () =>
+    run(async () => {
+      const urls = pastedUrls(text);
+      const r = await api<{ found: number; queued: number; ignored: number }>(token, 'admin/paste', { urls });
+      setResults([]);
+      setMsg(`Found ${r.found}, queued ${r.queued} (already known or not on GitHub: ${r.found - r.queued}), ignored ${r.ignored} that were not repo links.`);
+      setText('');
+    });
   return (
     <>
-      <h3>PASTE LINKS</h3>
+      <h3>ADD REPOS</h3>
       <textarea rows={8} value={text} onChange={(e) => setText(e.target.value)} placeholder={'https://github.com/owner/repo\nowner/other-repo'} />
-      <p className="small">{urls.length} link{urls.length === 1 ? '' : 's'} (max 20). They go to the queue as "manual".</p>
+      <p className={tooMany ? 'err' : 'small'}>{lines.length} repo{lines.length === 1 ? '' : 's'} (max 20, one per line). Repeats are dropped. ADD puts new ones on the shelves now (a few cents of AI each); SEND TO QUEUE waits for your approval.</p>
       {msg && <p className="small">{msg}</p>}
-      <button className="btn" disabled={busy || urls.length === 0} onClick={go}>{busy ? 'CHECKING...' : 'QUEUE THEM'}</button>
+      <div className="row">
+        <button className="btn" disabled={busy || lines.length === 0 || tooMany} onClick={add}>{busy ? 'WORKING...' : 'ADD TO SHELVES'}</button>
+        <button className="btn alt" disabled={busy || lines.length === 0 || tooMany} onClick={queue}>SEND TO QUEUE</button>
+      </div>
+      {results.length > 0 && (
+        <table className="admin-table">
+          <thead><tr><th>REPO</th><th>STATUS</th><th>GENRE</th></tr></thead>
+          <tbody>
+            {results.map((r, i) => (
+              <tr key={i}>
+                <td>{r.repo ?? r.input}</td>
+                <td><span className="badge" title={r.message}>{stockStatusLabel(r.status)}</span></td>
+                <td>{r.status === 'added' || r.status === 'restored' ? r.genre ?? '' : ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </>
   );
 }

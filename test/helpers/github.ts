@@ -75,3 +75,13 @@ export function stubGitHubAndSearch(routes: Parameters<typeof stubGitHub>[0], it
   });
   return urls;
 }
+
+/** GitHub API routes for any owner/repo: a small healthy repo, with a readme and a top-level listing. */
+export function repoRoutes(full: string, o: Record<string, unknown> = {}) {
+  const item = searchItem(full, o);
+  return {
+    [`/repos/${full}`]: { body: JSON.stringify(item) },
+    [`/repos/${full}/readme`]: { body: `# ${full}\nDoes things.` },
+    [`/repos/${full}/contents`]: { body: '[]' },
+  };
+}

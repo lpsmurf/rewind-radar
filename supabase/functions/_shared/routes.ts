@@ -1,14 +1,14 @@
 import { admin } from './admin.ts';
 import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, healthSignals, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
-import { candidates, dropOwn, inStore, ownSlugs, strongMatch, type CatalogRow } from './catalog.ts';
+import { candidates, dropOwn, inStore, ownSlugs, strongMatch, tapeSlugs, type CatalogRow } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
 import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef, profileQueries, searchRepos, searchTerms, type RepoFacts, type RepoHit } from './github.ts';
 import { collectAssessBatches, submitAssessBatch } from './batchAssess.ts';
 import { buildMonthlyPicks, previousMonth } from './monthly.ts';
-import { refreshRadar } from './radar.ts';
+import { pool, refreshRadar } from './radar.ts';
 import { isConfigKey, parseSourceConfig } from './sources/config.ts';
 import { snapshotStars } from './stars.ts';
 import { SOURCES } from './sources/index.ts';
@@ -206,6 +206,45 @@ const sumUsage = (us: Parameters<OnUsage>[1][]): Parameters<OnUsage>[1] =>
     cache_read_input_tokens: (a.cache_read_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0),
     cache_creation_input_tokens: (a.cache_creation_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
   }));
+
+type TapeRef = { slug: string; kind: string; archived: boolean };
+
+/** Existing tapes (live or archived) under any of these slugs, as a map keyed by lowercase slug. Throws when the read fails. */
+async function tapesBySlug(db: ReturnType<typeof admin>, slugs: string[]): Promise<Map<string, TapeRef>> {
+  const { data, error } = slugs.length ? await db.from('tapes').select('slug,kind,archived').in('slug', slugs) : { data: [], error: null };
+  if (error) throw error;
+  return new Map(((data ?? []) as TapeRef[]).map((t) => [t.slug.toLowerCase(), t]));
+}
+
+/** The tape already holding a repo's slug (gh- before c-): a live one wins over an archived one. */
+function existingTape(full: string, found: Map<string, TapeRef>): { live?: TapeRef; old?: TapeRef } {
+  const hits = tapeSlugs(full).map((s) => found.get(s)).filter((t): t is TapeRef => !!t);
+  return { live: hits.find((t) => !t.archived), old: hits[0] };
+}
+
+/**
+ * Put a repo on the shelves, the one way both approve and /admin/stock do it: Haiku reviews it (metered as route 'admin'),
+ * the tape is written (an archived `old` one is un-archived and refreshed in place, keeping its slug and kind), and the stars
+ * are snapshotted. `conflict` means someone else stocked it a moment ago (unique slug); nothing was changed then.
+ */
+async function stockRepo(
+  db: ReturnType<typeof admin>,
+  facts: RepoFacts,
+  meta: { credit?: { url?: string; title?: string }; old?: { slug: string; kind: string } } = {},
+): Promise<{ slug: string; conflict: boolean; genre: string }> {
+  const review = await meter('admin', (onUsage) => reviewRepo(facts, onUsage));
+  const tape = stockedTape(facts, review, meta.credit ?? {});
+  if (meta.old) {
+    const { error } = await db.from('tapes').upsert({ ...tape, slug: meta.old.slug, kind: meta.old.kind }, { onConflict: 'slug' }).select('id').single();
+    if (error) throw error;
+  } else {
+    const ins = await db.from('tapes').insert(tape).select('id').single();
+    if (ins.error && ins.error.code !== '23505') throw ins.error;
+    if (ins.error) return { slug: tape.slug, conflict: true, genre: tape.genre };
+  }
+  await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
+  return { slug: meta.old?.slug ?? tape.slug, conflict: false, genre: tape.genre };
+}
 
 const TAPE_COLS = 'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
 
@@ -604,17 +643,14 @@ export async function handle(req: Request): Promise<Response> {
         const done = () => db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('id', id);
         const ref = parseRepoRef(row.repo);
         // The tape may already exist: live means nothing to do; archived means bring it back.
-        const slugs = ref ? [`gh-${ref.owner}-${ref.repo}`, `c-${ref.owner}-${ref.repo}`].map((x) => x.toLowerCase()) : [];
-        const { data: found, error: findErr } = slugs.length ? await db.from('tapes').select('slug,kind,archived').in('slug', slugs) : { data: [], error: null };
-        if (findErr) throw findErr;
-        const live = (found ?? []).find((t: { archived: boolean }) => !t.archived);
+        const found = ref ? await tapesBySlug(db, tapeSlugs(ref.full)) : new Map<string, TapeRef>();
+        const { live, old } = ref ? existingTape(ref.full, found) : {};
         if (live) {
           const { error: e } = await done();
           if (e) throw e;
           claimed = false;
           return json({ ok: true, slug: live.slug, existing: true });
         }
-        const old = (found ?? [])[0] as { slug: string; kind: string } | undefined;
         if (!(await budgetLeft())) {
           await giveBack();
           return json({ error: CLERK_LINES.budgetBusy }, 503);
@@ -624,25 +660,16 @@ export async function handle(req: Request): Promise<Response> {
           await giveBack();
           return json({ error: 'That repo is no longer on GitHub' }, 404);
         }
-        const review = await meter('admin', (onUsage) => reviewRepo(facts, onUsage));
-        const tape = stockedTape(facts, review, { url: row.credit_url, title: row.credit_title });
-        if (old) {
-          const { error: e } = await db.from('tapes').upsert({ ...tape, slug: old.slug, kind: old.kind }, { onConflict: 'slug' }).select('id').single();
-          if (e) throw e;
-        } else {
-          const ins = await db.from('tapes').insert(tape).select('id').single();
-          if (ins.error && ins.error.code !== '23505') throw ins.error;
-          if (ins.error) {
-            await done();
-            claimed = false;
-            return json({ error: 'Already in the store' }, 409);
-          }
+        const stocked = await stockRepo(db, facts, { credit: { url: row.credit_url, title: row.credit_title }, old });
+        if (stocked.conflict) {
+          await done();
+          claimed = false;
+          return json({ error: 'Already in the store' }, 409);
         }
-        await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
         const { error: e } = await done();
         if (e) throw e;
         claimed = false;
-        return json({ ok: true, slug: old?.slug ?? tape.slug });
+        return json({ ok: true, slug: stocked.slug });
       } catch (e) {
         console.error('[admin:approve]', e);
         await giveBack();
@@ -665,6 +692,74 @@ export async function handle(req: Request): Promise<Response> {
         console.error('[admin:paste]', e);
         return json({ error: 'Could not queue those links' }, 500);
       }
+    }
+
+    // Stock repos straight from pasted links: duplicates are skipped before anything is spent, archived tapes come back,
+    // new ones go through the same stockRepo as approve. Time: GitHub facts (3 calls, ~1s) + one Haiku review (~2-3s) per repo,
+    // 3 at a time, so 20 repos take about 7 rounds of ~4s = ~30s, well inside the Edge request limit. Cost: ~$0.004 a review
+    // (about 3k tokens in, 150 out on Haiku), so ~$0.08 for 20, plus the optional half-price batch pre-assessment.
+    if (path === 'admin/stock' && req.method === 'POST') {
+      const urls = body.urls;
+      if (!Array.isArray(urls) || urls.length < 1 || urls.length > 20 || !urls.every((u) => typeof u === 'string')) {
+        return json({ error: 'Send 1 to 20 links as urls: string[]' }, 400);
+      }
+      if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
+      type Item = { input: string; repo?: string; status: 'added' | 'restored' | 'duplicate' | 'not_found' | 'invalid' | 'error'; slug?: string; genre?: string; message?: string };
+      const inputs = (urls as string[]).map((u) => u.slice(0, 300));
+      const seen = new Set<string>();
+      const todo: { i: number; ref: NonNullable<ReturnType<typeof parseRepoRef>> }[] = [];
+      const results: Item[] = inputs.map((input, i) => {
+        const ref = parseRepoRef(input);
+        if (!ref) return { input, status: 'invalid' };
+        const key = ref.full.toLowerCase();
+        if (seen.has(key)) return { input, repo: ref.full, status: 'duplicate', message: 'Repeated in this paste' };
+        seen.add(key);
+        todo.push({ i, ref });
+        return { input, repo: ref.full, status: 'error' }; // filled in below
+      });
+      try {
+        const found = await tapesBySlug(db, todo.flatMap((t) => tapeSlugs(t.ref.full)));
+        const markQueue = async (full: string) => {
+          try {
+            await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('repo', full.toLowerCase()).eq('status', 'pending');
+          } catch (e) {
+            console.warn('[admin:stock] could not clear the queue row', e);
+          }
+        };
+        await pool(todo, 3, async ({ i, ref }) => {
+          const input = results[i].input;
+          try {
+            const { live, old } = existingTape(ref.full, found);
+            if (live) {
+              results[i] = { input, repo: ref.full, status: 'duplicate', slug: live.slug };
+              return await markQueue(ref.full);
+            }
+            const facts = await fetchRepoFacts(ref);
+            if (!facts) {
+              results[i] = { input, repo: ref.full, status: 'not_found', message: 'GitHub does not have that repo' };
+              return;
+            }
+            const stocked = await stockRepo(db, facts, { old });
+            results[i] = { input, repo: ref.full, status: stocked.conflict ? 'duplicate' : old ? 'restored' : 'added', slug: stocked.slug, ...(stocked.conflict ? {} : { genre: stocked.genre }) };
+            await markQueue(ref.full);
+          } catch (e) {
+            console.error('[admin:stock]', ref.full, e);
+            results[i] = { input, repo: ref.full, status: 'error', message: e instanceof GitHubError ? `GitHub said ${e.status}. Try again later.` : 'Could not stock that repo' };
+          }
+        });
+      } catch (e) {
+        console.error('[admin:stock]', e);
+        return json({ error: 'Could not stock those repos' }, 500);
+      }
+      const added = results.filter((r) => r.status === 'added' || r.status === 'restored');
+      if (added.length) {
+        // like the radar: best-effort batch pre-assessment of what just went on the shelves, kept going after we answer
+        const job = submitAssessBatch(added.map((r) => r.repo!.toLowerCase())).catch((e) => console.warn('[admin:stock] batch hook failed', e));
+        const rt = (globalThis as any).EdgeRuntime;
+        if (rt?.waitUntil) rt.waitUntil(job);
+        else await job;
+      }
+      return json({ results, added: added.length, skipped: results.length - added.length });
     }
 
     if (path === 'admin/spend' && req.method === 'GET') {

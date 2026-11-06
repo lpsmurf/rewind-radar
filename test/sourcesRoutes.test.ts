@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { arg, fakeDb, has, usageTable, type Query } from './helpers/fakeDb.ts';
 import { toolReply } from './helpers/anthropic.ts';
-import { POSTIZ, stubGitHub } from './helpers/github.ts';
+import { POSTIZ, repoRoutes, stubGitHub } from './helpers/github.ts';
 
 const { create, db, reg, batch } = vi.hoisted(() => ({ create: vi.fn(), db: { current: null as any }, reg: { sources: [] as any[] }, batch: { submit: vi.fn(), collect: vi.fn(), order: [] as string[] } }));
 vi.mock('../lib/batchAssess.ts', () => ({ submitAssessBatch: batch.submit, collectAssessBatches: batch.collect }));
@@ -61,7 +61,7 @@ beforeEach(() => {
 });
 
 describe('admin auth (every /admin route)', () => {
-  const routes: [string, string][] = [['GET', 'admin/config/youtube'], ['PUT', 'admin/config/web'], ['GET', 'admin/queue'], ['POST', 'admin/queue/7/approve'], ['POST', 'admin/queue/7/reject'], ['POST', 'admin/paste'], ['GET', 'admin/spend'], ['GET', 'admin/runs']];
+  const routes: [string, string][] = [['GET', 'admin/config/youtube'], ['PUT', 'admin/config/web'], ['GET', 'admin/queue'], ['POST', 'admin/queue/7/approve'], ['POST', 'admin/queue/7/reject'], ['POST', 'admin/paste'], ['POST', 'admin/stock'], ['GET', 'admin/spend'], ['GET', 'admin/runs']];
   it.each(routes)('%s %s refuses a wrong or missing token, and touches nothing', async (m, p) => {
     const d = setup();
     expect((await call(m, p, { token: 'nope' })).status).toBe(403);
@@ -324,6 +324,156 @@ describe('POST /admin/paste', () => {
     d.on('ingest_queue', () => ({ data: null, error: { message: 'down' } }));
     const r = await call('POST', 'admin/paste', { body: { urls: ['https://github.com/gitroomhq/postiz-app'] } });
     expect(r.status).toBe(500);
+  });
+});
+
+describe('POST /admin/stock', () => {
+  const stock = (urls: unknown, o: { ip?: string } = {}) => call('POST', 'admin/stock', { body: { urls }, ...o });
+  /** The tapes table answers the slug lookup with `existing` (matched on the .in('slug', ...) list), and inserts fine. */
+  const withTapes = (existing: { slug: string; kind: string; archived: boolean }[] = [], o: Parameters<typeof setup>[0] = {}) => {
+    const d = setup(o);
+    d.on('tapes', (q: Query) => {
+      if (has(q, 'upsert') || has(q, 'insert')) return { data: { id: 'tape-1' }, error: null };
+      const slugs: string[] = (q.calls.find((c) => c[0] === 'in') as any)?.[2] ?? [];
+      return { data: existing.filter((t) => slugs.includes(t.slug)), error: null };
+    });
+    return d;
+  };
+  beforeEach(() => {
+    create.mockResolvedValue(toolReply('review_repo', REVIEW));
+    batch.submit.mockReset().mockResolvedValue(null);
+  });
+
+  it('stocks a new repo: reviewed by Haiku, metered as "admin", star snapshot, trust and shelf dates like approve', async () => {
+    stubGitHub(POSTIZ);
+    const d = withTapes();
+    const r = await stock(['https://github.com/gitroomhq/postiz-app']);
+    expect(r).toEqual({
+      status: 200,
+      body: { results: [{ input: 'https://github.com/gitroomhq/postiz-app', repo: 'gitroomhq/postiz-app', status: 'added', slug: 'gh-gitroomhq-postiz-app', genre: 'Dev Workflow' }], added: 1, skipped: 0 },
+    });
+    expect(writes(d, 'tapes', 'insert')).toEqual([
+      expect.objectContaining({ kind: 'repo', slug: 'gh-gitroomhq-postiz-app', genre: 'Dev Workflow', ring: 'trial', rating: 4, trust: 'clean', archived: false, credit_url: null, week: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/), month: expect.stringMatching(/^\d{4}-\d{2}-01$/) }),
+    ]);
+    expect(writes(d, 'star_snapshots', 'upsert')).toEqual([[expect.objectContaining({ repo: 'gitroomhq/postiz-app' })]]);
+    expect(writes(d, 'ai_usage', 'insert').map((x: any) => x.route)).toEqual(['admin']);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+  it('accepts bare owner/repo, and submits the added repos for batch pre-assessment', async () => {
+    stubGitHub({ ...repoRoutes('acme/widget'), ...repoRoutes('acme/gadget') });
+    withTapes();
+    const r = await stock(['acme/widget', 'https://github.com/acme/gadget']);
+    expect(r.body.results.map((x: any) => x.status)).toEqual(['added', 'added']);
+    expect(batch.submit).toHaveBeenCalledTimes(1);
+    expect([...batch.submit.mock.calls[0][0]].sort()).toEqual(['acme/gadget', 'acme/widget']);
+  });
+  it('calls a live tape a duplicate (gh- or c- slug) before spending anything: no GitHub call, no AI', async () => {
+    const seen = stubGitHub({});
+    const d = withTapes([{ slug: 'gh-acme-widget', kind: 'repo', archived: false }, { slug: 'c-acme-gadget', kind: 'community', archived: false }]);
+    const r = await stock(['acme/widget', 'https://github.com/Acme/Gadget']);
+    expect(r.body.results).toEqual([
+      { input: 'acme/widget', repo: 'acme/widget', status: 'duplicate', slug: 'gh-acme-widget' },
+      { input: 'https://github.com/Acme/Gadget', repo: 'Acme/Gadget', status: 'duplicate', slug: 'c-acme-gadget' },
+    ]);
+    expect(r.body).toMatchObject({ added: 0, skipped: 2 });
+    expect(seen).toHaveLength(0);
+    expect(create).not.toHaveBeenCalled();
+    expect(writes(d, 'tapes', 'insert')).toHaveLength(0);
+    expect(writes(d, 'ai_usage', 'insert')).toHaveLength(0);
+  });
+  it('restores an archived tape: un-archived and refreshed by upsert on its own slug, kind kept', async () => {
+    stubGitHub(repoRoutes('acme/widget'));
+    const d = withTapes([{ slug: 'gh-acme-widget', kind: 'repo', archived: true }]);
+    const r = await stock(['acme/widget']);
+    expect(r.body.results).toEqual([expect.objectContaining({ status: 'restored', slug: 'gh-acme-widget', genre: 'Dev Workflow' })]);
+    expect(r.body).toMatchObject({ added: 1, skipped: 0 });
+    expect(writes(d, 'tapes', 'insert')).toHaveLength(0);
+    expect(d.calls('tapes').find((q: Query) => has(q, 'upsert'))!.calls).toContainEqual(['upsert', expect.objectContaining({ slug: 'gh-acme-widget', kind: 'repo', archived: false }), { onConflict: 'slug' }]);
+  });
+  it('dedupes within the paste, case-insensitively, and reports the repeat as a duplicate without a second call', async () => {
+    stubGitHub(repoRoutes('acme/widget'));
+    withTapes();
+    const r = await stock(['acme/widget', 'https://github.com/ACME/Widget', 'https://github.com/acme/widget.git']);
+    expect(r.body.results.map((x: any) => x.status)).toEqual(['added', 'duplicate', 'duplicate']);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(r.body).toMatchObject({ added: 1, skipped: 2 });
+  });
+  it('marks lines that are not repos as invalid, with no calls', async () => {
+    const seen = stubGitHub({});
+    withTapes();
+    const r = await stock(['not a link', 'https://github.com/orgs/foo', '']);
+    expect(r.body.results.map((x: any) => x.status)).toEqual(['invalid', 'invalid', 'invalid']);
+    expect(r.body.results[0]).toMatchObject({ input: 'not a link' });
+    expect(seen).toHaveLength(0);
+    expect(create).not.toHaveBeenCalled();
+  });
+  it('reports a repo GitHub does not know as not_found, and carries on', async () => {
+    stubGitHub(repoRoutes('acme/widget'));
+    withTapes();
+    const r = await stock(['acme/ghost', 'acme/widget']);
+    expect(r.body.results.map((x: any) => x.status)).toEqual(['not_found', 'added']);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+  it('one GitHub error (e.g. rate limit) becomes an error item and the others continue', async () => {
+    stubGitHub({ ...repoRoutes('acme/widget'), '/repos/acme/flaky': 403, ...repoRoutes('acme/gadget') });
+    withTapes();
+    const r = await stock(['acme/widget', 'acme/flaky', 'acme/gadget']);
+    expect(r.body.results.map((x: any) => x.status)).toEqual(['added', 'error', 'added']);
+    expect(r.body.results[1].message).toEqual(expect.any(String));
+    expect(r.body).toMatchObject({ added: 2, skipped: 1 });
+  });
+  it('a failing review is an error item for that repo only', async () => {
+    stubGitHub({ ...repoRoutes('acme/widget'), ...repoRoutes('acme/gadget') });
+    withTapes();
+    create.mockRejectedValueOnce(new Error('anthropic down'));
+    const r = await stock(['acme/widget', 'acme/gadget']);
+    expect(r.body.results.filter((x: any) => x.status === 'error')).toHaveLength(1);
+    expect(r.body.results.filter((x: any) => x.status === 'added')).toHaveLength(1);
+  });
+  it('503s with the busy line, and stocks and spends nothing, when the daily budget is gone', async () => {
+    vi.stubEnv('AI_DAILY_BUDGET_USD', '1');
+    const seen = stubGitHub(repoRoutes('acme/widget'));
+    const d = withTapes([], { spent: 2 });
+    const r = await stock(['acme/widget']);
+    expect(r.status).toBe(503);
+    expect(r.body.error).toMatch(/out of quarters/);
+    expect(create).not.toHaveBeenCalled();
+    expect(seen).toHaveLength(0);
+    expect(writes(d, 'tapes', 'insert')).toHaveLength(0);
+  });
+  it('marks a pending queue row for the same repo as stocked', async () => {
+    stubGitHub(repoRoutes('acme/widget'));
+    const d = withTapes();
+    await stock(['acme/widget']);
+    const q = d.calls('ingest_queue').find((x: Query) => has(x, 'update'))!;
+    expect(arg(q, 'update')).toEqual(expect.objectContaining({ status: 'stocked', decided_at: expect.any(String) }));
+    expect(q.calls).toContainEqual(['eq', 'repo', 'acme/widget']);
+    expect(q.calls).toContainEqual(['eq', 'status', 'pending']);
+  });
+  it('also clears the queue row for a duplicate (already stocked elsewhere)', async () => {
+    stubGitHub({});
+    const d = withTapes([{ slug: 'gh-acme-widget', kind: 'repo', archived: false }]);
+    await stock(['acme/widget']);
+    expect(d.calls('ingest_queue').some((x: Query) => has(x, 'update'))).toBe(true);
+  });
+  it('meters one "admin" usage row per review', async () => {
+    stubGitHub({ ...repoRoutes('acme/widget'), ...repoRoutes('acme/gadget') });
+    const d = withTapes();
+    await stock(['acme/widget', 'acme/gadget']);
+    expect(writes(d, 'ai_usage', 'insert').map((x: any) => x.route)).toEqual(['admin', 'admin']);
+  });
+  it('400s a missing list, a non-string entry and 21 links, touching nothing', async () => {
+    const d = withTapes();
+    expect((await stock(undefined)).status).toBe(400);
+    expect((await stock([])).status).toBe(400);
+    expect((await stock([5])).status).toBe(400);
+    expect((await stock(Array(21).fill('acme/widget'))).status).toBe(400);
+    expect(d.calls('tapes')).toHaveLength(0);
+  });
+  it('is limited per IP like the other admin routes', async () => {
+    withTapes();
+    for (let i = 0; i < 60; i++) await stock([], { ip: '10.7.7.7' });
+    expect((await stock([], { ip: '10.7.7.7' })).status).toBe(429);
   });
 });
 
