@@ -33,3 +33,66 @@ export function stubYouTube(o: { search?: (p: Record<string, string>) => string[
   });
   return calls;
 }
+
+export interface WatchVideo {
+  id: string;
+  title?: string;
+  description?: string;
+  publishedAt: string;
+  channel?: string;
+}
+export interface WatchThread {
+  author: string;
+  text: string;
+  replies?: { author: string; text: string }[];
+}
+
+/**
+ * Stub fetch for the channel watcher: channels.list (forHandle), playlistItems.list and commentThreads.list.
+ * `handles` maps a handle to its channel id; the uploads playlist of channel `UCx` is `UUx`. `uploads` maps a playlist id to its videos,
+ * `threads` a video id to its comment threads. `fail(kind, params)` returns an HTTP status to make that call fail.
+ */
+export function stubWatchApi(o: {
+  handles?: Record<string, string>;
+  uploads?: Record<string, WatchVideo[]>;
+  threads?: Record<string, WatchThread[]>;
+  fail?: (kind: string, params: Record<string, string>) => number | [number, string] | undefined;
+}) {
+  const calls: { kind: 'channels' | 'playlistItems' | 'commentThreads'; params: Record<string, string> }[] = [];
+  const comment = (author: string, text: string) => ({ snippet: { authorChannelId: { value: author }, textOriginal: text, textDisplay: text } });
+  vi.stubGlobal('fetch', async (input: unknown) => {
+    const u = new URL(String(input));
+    const params = Object.fromEntries(u.searchParams);
+    const kind = u.pathname.split('/').pop() as 'channels' | 'playlistItems' | 'commentThreads';
+    if (!['channels', 'playlistItems', 'commentThreads'].includes(kind)) throw new Error(`unmocked fetch: ${u}`);
+    calls.push({ kind, params });
+    const status = o.fail?.(kind, params);
+    if (status) {
+      const [code, reason] = Array.isArray(status) ? status : [status, 'backendError'];
+      return new Response(JSON.stringify({ error: { message: 'boom', errors: [{ reason }] } }), { status: code });
+    }
+    if (kind === 'channels') {
+      const id = o.handles?.[params.forHandle];
+      return new Response(JSON.stringify({ items: id ? [{ id, contentDetails: { relatedPlaylists: { uploads: 'UU' + id.slice(2) } } }] : [] }));
+    }
+    if (kind === 'playlistItems') {
+      const items = (o.uploads?.[params.playlistId] ?? []).map((v) => ({
+        snippet: {
+          title: v.title ?? `Video ${v.id}`,
+          description: v.description ?? '',
+          publishedAt: v.publishedAt,
+          channelTitle: v.channel ?? 'The Channel',
+          resourceId: { videoId: v.id },
+        },
+        contentDetails: { videoId: v.id, videoPublishedAt: v.publishedAt },
+      }));
+      return new Response(JSON.stringify({ items }));
+    }
+    const items = (o.threads?.[params.videoId] ?? []).map((t) => ({
+      snippet: { topLevelComment: comment(t.author, t.text) },
+      replies: t.replies ? { comments: t.replies.map((r) => comment(r.author, r.text)) } : undefined,
+    }));
+    return new Response(JSON.stringify({ items }));
+  });
+  return calls;
+}
