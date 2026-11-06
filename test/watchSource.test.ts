@@ -330,3 +330,83 @@ describe('watchChannels backfill', () => {
     expect((s.store.watch as any).seen).toHaveLength(3);
   });
 });
+
+describe('watchChannels automatic backfill (cron path, auto: true)', () => {
+  const daysAgo = (d: number) => hoursAgo(d * 24);
+  const resolved = { handle: '@Chan', channel_id: CH, uploads: UPLOADS };
+
+  it('gives a channel without backfilled_at the 120 day window and pages 50 at a time', async () => {
+    const calls = api([vid('old', 24 * 100), vid('older', 24 * 130)], {});
+    const s = setup();
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(calls.find((c) => c.kind === 'playlistItems')!.params.maxResults).toBe('50');
+    expect(r.videos_checked).toBe(1); // 100 days old is inside 120, 130 is not
+  });
+  it('gives a channel with backfilled_at only the 14 day window and one page of 5', async () => {
+    const calls = api([vid('old', 24 * 100), vid('recent', 72)], {});
+    const s = setup({ watch: { channels: [{ ...resolved, backfilled_at: daysAgo(1) }], seen: [] } });
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(calls.find((c) => c.kind === 'playlistItems')!.params.maxResults).toBe('5');
+    expect(r.videos_checked).toBe(1);
+    expect(s.stocked).toEqual([]);
+  });
+  it('mixes windows per channel', async () => {
+    const CH2 = 'UC' + 'b'.repeat(22);
+    stubWatchApi({
+      handles: { '@Chan': CH, '@Two': CH2 },
+      uploads: { [UPLOADS]: [vid('a', 24 * 60)], ['UU' + 'b'.repeat(22)]: [vid('b', 24 * 60)] },
+    });
+    const s = setup({ watch: { channels: [{ handle: '@Chan' }, { handle: '@Two', backfilled_at: daysAgo(1) }], seen: [] } });
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.videos_checked).toBe(1);
+  });
+  it('without auto, a config without backfilled_at still uses 14 days and sets nothing', async () => {
+    api([vid('old', 24 * 60)], {});
+    const s = setup();
+    const r = await watchChannels(s.ctx);
+    expect(r.videos_checked).toBe(0);
+    expect((s.store.watch as any).channels[0].backfilled_at).toBeUndefined();
+  });
+  it('sets backfilled_at when remaining reaches 0', async () => {
+    api([vid('a', 24 * 100)], {});
+    const s = setup();
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.remaining).toBe(0);
+    expect((s.store.watch as any).channels[0].backfilled_at).toBe(NOW.toISOString());
+  });
+  it('keeps backfilling (no backfilled_at) while videos remain, and records how many are left', async () => {
+    api(Array.from({ length: 13 }, (_, i) => vid(`v${i}`, 24 * (100 - i))), {});
+    const s = setup();
+    const r = await watchChannels(s.ctx, { auto: true });
+    expect(r.remaining).toBe(3);
+    const ch = (s.store.watch as any).channels[0];
+    expect(ch.backfilled_at).toBeUndefined();
+    expect(ch.backfill_left).toBe(3);
+    await watchChannels(s.ctx, { auto: true });
+    const done = (s.store.watch as any).channels[0];
+    expect(done.backfilled_at).toBe(NOW.toISOString());
+    expect(done.backfill_left).toBeUndefined();
+  });
+  it('does not mark a channel whose API call failed', async () => {
+    api([vid('a', 24 * 100)], {}, { fail: (k) => (k === 'playlistItems' ? 500 : undefined) });
+    const s = setup();
+    await watchChannels(s.ctx, { auto: true });
+    expect((s.store.watch as any).channels[0].backfilled_at).toBeUndefined();
+  });
+  it('only marks handles still present, and never re-adds a removed one', async () => {
+    api([vid('a', 24 * 100)], {});
+    const s = setup();
+    const real = s.ctx.config;
+    let reads = 0;
+    s.ctx.config = async (k) => (++reads === 2 ? { channels: [{ handle: '@Other' }], seen: [] } : real(k));
+    await watchChannels(s.ctx, { auto: true });
+    expect((s.store.watch as any).channels).toEqual([{ handle: '@Other' }]);
+  });
+  it('an existing backfilled_at survives the merge', async () => {
+    api([], {});
+    const at = daysAgo(3);
+    const s = setup({ watch: { channels: [{ handle: '@Chan', backfilled_at: at }], seen: [] } });
+    await watchChannels(s.ctx, { auto: true });
+    expect((s.store.watch as any).channels[0]).toEqual({ ...resolved, backfilled_at: at });
+  });
+});
