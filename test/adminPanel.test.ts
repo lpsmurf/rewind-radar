@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { adminHeaders, safeHref, formatUsd, isAdminHash, isChannelId, failedLines, linesOf, pastedUrls, repoKey, stockLines, stockStatusLabel, stockSummary, spendTable, shortDate } from '../src/lib/adminPanel.ts';
+import { adminHeaders, safeHref, formatUsd, isAdminHash, isChannelId, failedLines, linesOf, pastedUrls, repoKey, stockLines, stockStatusLabel, stockSummary, spendTable, shortDate, runBackfill, backfillLine, type WatchRunResult, type BackfillTotals } from '../src/lib/adminPanel.ts';
 
 describe('isAdminHash', () => {
   it('matches #admin only', () => {
@@ -131,5 +131,77 @@ describe('failedLines and stockSummary', () => {
   });
   it('summarises added and skipped', () => {
     expect(stockSummary({ added: 7, skipped: 3 })).toBe('Added 7 · skipped 3');
+  });
+});
+
+describe('runBackfill', () => {
+  const res = (o: Partial<WatchRunResult> = {}): WatchRunResult => ({ videos_checked: 10, added: 0, restored: 0, duplicates: 0, errors: 0, remaining: 0, ...o });
+  const run = (results: (WatchRunResult | Error)[], o: Partial<Parameters<typeof runBackfill>[0]> = {}) => {
+    const days: number[] = [];
+    const progress: BackfillTotals[] = [];
+    const sleeps: number[] = [];
+    let i = 0;
+    const p = runBackfill({
+      days: 120,
+      call: async (d) => {
+        days.push(d);
+        const r = results[Math.min(i++, results.length - 1)];
+        if (r instanceof Error) throw r;
+        return r;
+      },
+      onProgress: (t) => progress.push(t),
+      sleep: async (ms) => void sleeps.push(ms),
+      ...o,
+    });
+    return { p, days, progress, sleeps };
+  };
+
+  it('stops at remaining 0 and sends the days each call', async () => {
+    const x = run([res({ remaining: 20 }), res({ remaining: 10 }), res({ remaining: 0 })]);
+    const r = await x.p;
+    expect(r.stop).toBe('done');
+    expect(r.totals.calls).toBe(3);
+    expect(x.days).toEqual([120, 120, 120]);
+    expect(x.sleeps).toHaveLength(2);
+  });
+
+  it('accumulates totals and reports live progress', async () => {
+    const x = run([res({ added: 6, duplicates: 3, restored: 1, remaining: 7 }), res({ added: 4, duplicates: 2, errors: 1, remaining: 0 })]);
+    const r = await x.p;
+    expect(r.totals).toMatchObject({ added: 10, duplicates: 5, restored: 1, errors: 1, videos: 20, remaining: 0 });
+    expect(x.progress.map((t) => t.remaining)).toEqual([7, 0]);
+    expect(backfillLine(x.progress[0])).toBe('videos left: 7 · added 6 · already in store 3 · restored 1');
+  });
+
+  it('stops on an error and says why', async () => {
+    const r = await run([res({ remaining: 5, added: 2 }), new Error('Error 503')]).p;
+    expect(r).toMatchObject({ stop: 'error', reason: 'Error 503' });
+    expect(r.totals.added).toBe(2);
+  });
+
+  it('stops when the watcher reports a skip (budget)', async () => {
+    const r = await run([res({ remaining: 5, skipped: 'AI budget spent, will retry' })]).p;
+    expect(r).toMatchObject({ stop: 'skipped', reason: 'AI budget spent, will retry' });
+  });
+
+  it('stops at the call limit', async () => {
+    const x = run([res({ remaining: 99 })]);
+    const r = await x.p;
+    expect(r.stop).toBe('limit');
+    expect(r.totals.calls).toBe(30);
+    expect(x.days).toHaveLength(30);
+  });
+
+  it('stops when a call makes no progress', async () => {
+    const r = await run([res({ videos_checked: 0, remaining: 2 })]).p;
+    expect(r.stop).toBe('stalled');
+    expect(r.totals.calls).toBe(1);
+  });
+
+  it('stops when cancelled', async () => {
+    let n = 0;
+    const r = await run([res({ remaining: 99 })], { cancelled: () => n++ >= 2 }).p;
+    expect(r).toMatchObject({ stop: 'cancelled' });
+    expect(r.totals.calls).toBe(2);
   });
 });

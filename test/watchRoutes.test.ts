@@ -13,9 +13,9 @@ vi.mock('../lib/batchAssess.ts', () => ({ submitAssessBatch: batch.submit, colle
 vi.mock('@anthropic-ai/sdk', () => ({ default: class { messages = { create }; } }));
 vi.mock('../lib/admin.ts', () => ({ admin: () => db.current.client }));
 vi.mock('../lib/sources/watch.ts', () => ({
-  watchChannels: async (ctx: any) => {
+  watchChannels: async (ctx: any, opts?: unknown) => {
     watch.ctx = ctx;
-    return watch.run(ctx);
+    return watch.run(ctx, opts);
   },
 }));
 
@@ -170,5 +170,27 @@ describe('PUT /admin/config/watch', () => {
     const d = setup();
     expect((await put({ channels: ['nope'] })).status).toBe(400);
     expect(writes(d, 'source_config', 'upsert')).toEqual([]);
+  });
+});
+
+describe('watch days', () => {
+  it('cron runs ignore a days body and use the 14 day default', async () => {
+    setup();
+    const r = await handle(new Request('http://localhost/api/sources/watch', { method: 'POST', headers: { 'x-cron-secret': 's3cret', 'x-forwarded-for': '10.8.0.1' }, body: JSON.stringify({ days: 120 }) }));
+    expect(r.status).toBe(200);
+    expect(watch.run.mock.calls.at(-1)![1]).toBeUndefined();
+  });
+
+  it('the admin run passes a days body on, and none when the body is empty or wrong', async () => {
+    setup();
+    const post = (body: string) => handle(new Request('http://localhost/api/admin/watch/run', { method: 'POST', headers: { 'x-admin-token': 'open-sesame-open-sesame-open-sesame', 'x-forwarded-for': `10.8.1.${++ips}` }, body }));
+    await post(JSON.stringify({ days: 120 }));
+    expect(watch.run.mock.calls.at(-1)![1]).toEqual({ days: 120 });
+    await post('{}');
+    expect(watch.run.mock.calls.at(-1)![1]).toEqual({});
+    await post('not json');
+    expect(watch.run.mock.calls.at(-1)![1]).toEqual({});
+    await post(JSON.stringify({ days: 'x' }));
+    expect(watch.run.mock.calls.at(-1)![1]).toEqual({});
   });
 });

@@ -298,7 +298,7 @@ function liveWatchCtx(): WatchCtx {
 }
 
 /** Run the watcher, then batch pre-assess whatever it put on the shelves (best-effort, like /admin/stock). */
-async function runWatch() {
+async function runWatch(opts?: { days?: number }) {
   const stocked: string[] = [];
   const ctx = liveWatchCtx();
   const stock = ctx.stock;
@@ -307,7 +307,7 @@ async function runWatch() {
     if (r.status === 'added' || r.status === 'restored') stocked.push(repo.toLowerCase());
     return r;
   };
-  const out = await watchChannels(ctx);
+  const out = await watchChannels(ctx, opts);
   if (stocked.length) await submitAssessBatch(stocked).catch((e) => console.warn('[watch] batch hook failed', e));
   return out;
 }
@@ -843,7 +843,9 @@ export async function handle(req: Request): Promise<Response> {
     // Run the channel watcher now and wait for its summary: about 3 YouTube calls, then GitHub plus one Haiku review per new repo.
     if (path === 'admin/watch/run' && req.method === 'POST') {
       try {
-        return json({ ok: true, ...(await runWatch()) });
+        // Optional { days } widens the window for a backfill; anything else keeps the default.
+        const days = body.days;
+        return json({ ok: true, ...(await runWatch(typeof days === 'number' && Number.isFinite(days) ? { days } : {})) });
       } catch (e) {
         console.error('[admin:watch]', e);
         return json({ error: 'Watch run failed' }, 500);

@@ -50,7 +50,7 @@ export interface WatchThread {
 /**
  * Stub fetch for the channel watcher: channels.list (forHandle), playlistItems.list and commentThreads.list.
  * `handles` maps a handle to its channel id; the uploads playlist of channel `UCx` is `UUx`. `uploads` maps a playlist id to its videos,
- * `threads` a video id to its comment threads. `fail(kind, params)` returns an HTTP status to make that call fail.
+ * `threads` a video id to its comment threads. playlistItems pages by `maxResults` and `pageToken` (an offset) and sets `nextPageToken`, newest video first as listed. `fail(kind, params)` returns an HTTP status to make that call fail.
  */
 export function stubWatchApi(o: {
   handles?: Record<string, string>;
@@ -76,7 +76,10 @@ export function stubWatchApi(o: {
       return new Response(JSON.stringify({ items: id ? [{ id, contentDetails: { relatedPlaylists: { uploads: 'UU' + id.slice(2) } } }] : [] }));
     }
     if (kind === 'playlistItems') {
-      const items = (o.uploads?.[params.playlistId] ?? []).map((v) => ({
+      const all = o.uploads?.[params.playlistId] ?? [];
+      const size = Number(params.maxResults) || all.length;
+      const from = Number(params.pageToken) || 0;
+      const items = all.slice(from, from + size).map((v) => ({
         snippet: {
           title: v.title ?? `Video ${v.id}`,
           description: v.description ?? '',
@@ -86,7 +89,7 @@ export function stubWatchApi(o: {
         },
         contentDetails: { videoId: v.id, videoPublishedAt: v.publishedAt },
       }));
-      return new Response(JSON.stringify({ items }));
+      return new Response(JSON.stringify({ items, ...(from + size < all.length ? { nextPageToken: String(from + size) } : {}) }));
     }
     const items = (o.threads?.[params.videoId] ?? []).map((t) => ({
       snippet: { topLevelComment: comment(t.author, t.text) },
