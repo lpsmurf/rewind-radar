@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { Tape, Visitor, Aisle, Room as RoomId } from '../types';
-import { GENRES, aisleOf, latestWeek, RING_COLORS, PALETTE as P } from '../types';
+import { DEFAULT_ROOM, GENRES, aisleOf, latestWeek, RING_COLORS, PALETTE as P } from '../types';
 import {
   ARCADE_CABINETS, ARCADE_EXIT, ARCADE_SPAWN, BH, BW, CABINET_TOP, DOOR, H, REPOS_DOOR, W,
   bx, by, clampToFloor, doorAt, findPath, inRect, keyVector, lerpRemote, spawnFor, stepBy, stepToward,
@@ -111,14 +111,14 @@ function buildStatic(room: 'store' | 'repos'): HTMLCanvasElement {
   g.fillStyle = P.navyDark; g.fillRect(0, 98, W, 6);
   g.fillStyle = P.yellow; g.fillRect(0, 104, W, 3);
   iso(g);
-  // doorways: the arcade (skills room only) and the other store room
-  if (room === 'store') {
+  // doorways: the arcade (repos room only) and the other store room
+  if (room === 'repos') {
     g.fillStyle = P.ink; g.fillRect(DOOR.x, DOOR.y, DOOR.w, DOOR.h);
     g.fillStyle = '#ff6bd6'; g.fillRect(DOOR.x + 3, DOOR.y + 3, DOOR.w - 6, DOOR.h - 3);
     g.fillStyle = '#12082e'; g.fillRect(DOOR.x + 6, DOOR.y + 6, DOOR.w - 12, DOOR.h - 6);
   }
   g.fillStyle = P.ink; g.fillRect(REPOS_DOOR.x, REPOS_DOOR.y, REPOS_DOOR.w, REPOS_DOOR.h);
-  g.fillStyle = room === 'store' ? '#3ddc84' : P.yellowDark; g.fillRect(REPOS_DOOR.x + 3, REPOS_DOOR.y + 3, REPOS_DOOR.w - 6, REPOS_DOOR.h - 3);
+  g.fillStyle = room === 'repos' ? P.yellow : '#3ddc84'; g.fillRect(REPOS_DOOR.x + 3, REPOS_DOOR.y + 3, REPOS_DOOR.w - 6, REPOS_DOOR.h - 3);
   g.fillStyle = P.navyDark; g.fillRect(REPOS_DOOR.x + 6, REPOS_DOOR.y + 6, REPOS_DOOR.w - 12, REPOS_DOOR.h - 6);
   // room title painted on the floor, left of the counter
   g.font = '16px "Press Start 2P", monospace'; g.textBaseline = 'top';
@@ -212,7 +212,7 @@ export default function Store(props: StoreProps) {
 
     const loop = (now: number) => {
       const p = pr.current;
-      const room: Room = p.me.aisle === 'arcade' ? 'arcade' : (p.me.room ?? 'store');
+      const room: Room = p.me.aisle === 'arcade' ? 'arcade' : (p.me.room ?? DEFAULT_ROOM);
       const bg = room === 'arcade' ? bgArcade : room === 'repos' ? bgRepos : bgStore;
       const dt = Math.min(0.05, last ? (now - last) / 1000 : 0.016);
       last = now;
@@ -309,8 +309,8 @@ export default function Store(props: StoreProps) {
         sign('WEEKLY NEW RELEASES', WALL_SHELVES.weekly.x + WALL_SHELVES.weekly.w / 2, 5, hlNew, true);
         sign('MONTHLY PICKS', WALL_SHELVES.monthly.x + WALL_SHELVES.monthly.w / 2, 5, hlMon, true);
         if (room === 'repos') sign('COMMUNITY PICKS', WALL_SHELVES.community.x + WALL_SHELVES.community.w / 2, 5, hlCom, true);
-        if (room === 'store') sign('ARCADE →', DOOR.x + DOOR.w / 2, DOOR.y - 14, true);
-        sign(room === 'store' ? 'REPOS →' : '← SKILLS', REPOS_DOOR.x + REPOS_DOOR.w / 2, REPOS_DOOR.y - 14, true);
+        if (room === 'repos') sign('ARCADE →', DOOR.x + DOOR.w / 2, DOOR.y - 14, true);
+        sign(room === 'repos' ? 'SKILLS →' : '← REPOS', REPOS_DOOR.x + REPOS_DOOR.w / 2, REPOS_DOOR.y - 14, true);
 
         // genre aisles
         GENRES.forEach((gn, i) => {
@@ -398,7 +398,7 @@ export default function Store(props: StoreProps) {
 
       // everyone else in this room walks toward their last broadcast position
       type Av = { v: Visitor; x: number; y: number; me: boolean; walking: boolean };
-      const inRoom = p.visitors.filter((v) => (v.aisle === 'arcade' ? 'arcade' : (v.room ?? 'store')) === room);
+      const inRoom = p.visitors.filter((v) => (v.aisle === 'arcade' ? 'arcade' : (v.room ?? DEFAULT_ROOM)) === room);
       if (smooth.current.size > inRoom.length + 8) {
         const ids = new Set(inRoom.map((v) => v.id));
         for (const k of smooth.current.keys()) if (!ids.has(k)) smooth.current.delete(k);
@@ -509,7 +509,7 @@ export default function Store(props: StoreProps) {
       onClick={(e) => {
         const p = pos(e);
         mouse.current = p;
-        const room: Room = props.me.aisle === 'arcade' ? 'arcade' : (props.me.room ?? 'store');
+        const room: Room = props.me.aisle === 'arcade' ? 'arcade' : (props.me.room ?? DEFAULT_ROOM);
         const go = (to: Room) => {
           // Move first so the presence update that follows already carries the new room's position.
           const spawn = spawnFor(to, room);
@@ -521,7 +521,7 @@ export default function Store(props: StoreProps) {
         };
         if (room === 'arcade') {
           if (cabHover.current >= 0 || ARCADE_CABINETS.some((c) => p.x >= c.x && p.x < c.x + c.w && p.y >= CABINET_TOP && p.y < c.y + c.h)) return props.onCabinetClick();
-          if (doorAt('arcade', p)) return go('store');
+          if (doorAt('arcade', p)) return go('repos');
         } else {
           const h = [...hits.current].reverse().find((h) => p.x >= h.x && p.x < h.x + h.w && p.y >= h.y && p.y < h.y + h.h);
           if (h) return props.onTapeClick(h.t, h.src);

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API, API_ABS } from './api';
 import type { Aisle, ClerkReply, Proposal, Room, Tape, Visitor } from '../types';
-import { GENRES, latestWeek } from '../types';
+import { DEFAULT_ROOM, GENRES, latestWeek } from '../types';
 import { MOCK_TAPES } from '../data/mock';
 import { sb } from './supabase';
 import { canSignIn, clerkHeaders, gateReply, memberOf, type Member } from './clerkGate';
@@ -43,8 +43,8 @@ export function useStore() {
   const visitorsRef = useRef<Visitor[]>([]);
   const gateRef = useRef(createSendGate());
   const [aisle, setAisleState] = useState<Aisle>('entrance');
-  const [room, setRoomState] = useState<Room>('store');
-  const roomRef = useRef<Room>('store');
+  const [room, setRoomState] = useState<Room>(DEFAULT_ROOM);
+  const roomRef = useRef<Room>(DEFAULT_ROOM);
   const [tapes, setTapes] = useState<Tape[]>(sb ? [] : MOCK_TAPES);
   const [visitors, setVisitors] = useState<Visitor[]>([]);
   const [monthly, setMonthly] = useState<Tape[]>([]);
@@ -63,7 +63,7 @@ export function useStore() {
   const chanRef = useRef<ReturnType<NonNullable<typeof sb>['channel']> | null>(null);
   const toastTimer = useRef<number>();
   const subscribedRef = useRef(false); // broadcasts only go out on a joined channel; send() would fall back to REST
-  const presenceRef = useRef<PresencePayload>({ name: meRef.current.name, color: meRef.current.color, room: 'store' });
+  const presenceRef = useRef<PresencePayload>({ name: meRef.current.name, color: meRef.current.color, room: DEFAULT_ROOM });
   const gateRef2 = useRef(createTrackGate((p) => {
     if (subscribedRef.current) chanRef.current?.track({ ...p, ...posRef.current });
   }));

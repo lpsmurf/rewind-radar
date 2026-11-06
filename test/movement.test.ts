@@ -219,10 +219,14 @@ describe('rooms: the repos room has the same layout as the skills room', () => {
     const p = clampToFloor({ x: s.x + s.w / 2, y: s.y + s.h / 2 }, 'repos');
     expect(inside(p, s)).toBe(false);
   });
-  it('doors: skills has ARCADE and REPOS, repos has SKILLS, arcade has the exit', () => {
-    expect(doorsIn('store').map((d) => d.to).sort()).toEqual(['arcade', 'repos']);
-    expect(doorsIn('repos').map((d) => d.to)).toEqual(['store']);
-    expect(doorsIn('arcade').map((d) => d.to)).toEqual(['store']);
+  it('doors: repos (the entrance) has SKILLS and ARCADE, skills has only the way back, arcade exits to repos', () => {
+    expect(doorsIn('repos').map((d) => d.to).sort()).toEqual(['arcade', 'store']);
+    expect(doorsIn('store').map((d) => d.to)).toEqual(['repos']);
+    expect(doorsIn('arcade').map((d) => d.to)).toEqual(['repos']);
+  });
+  it('the arcade can only be entered from the repos room', () => {
+    expect(doorsIn('store').some((d) => d.to === 'arcade')).toBe(false);
+    expect(doorsIn('repos').some((d) => d.to === 'arcade')).toBe(true);
   });
   it('every door sits on the floor, clear of shelves, and the doors do not overlap', () => {
     for (const room of ['store', 'repos', 'arcade'] as const) {
@@ -242,19 +246,19 @@ describe('rooms: the repos room has the same layout as the skills room', () => {
     }
   });
   it('doorAt finds the door under a point', () => {
-    expect(doorAt('store', { x: DOOR.x + 5, y: DOOR.y + 5 })).toBe('arcade');
-    expect(doorAt('store', { x: REPOS_DOOR.x + 5, y: REPOS_DOOR.y + 5 })).toBe('repos');
+    expect(doorAt('repos', { x: DOOR.x + 5, y: DOOR.y + 5 })).toBe('arcade');
     expect(doorAt('repos', { x: REPOS_DOOR.x + 5, y: REPOS_DOOR.y + 5 })).toBe('store');
-    expect(doorAt('repos', { x: DOOR.x + 5, y: DOOR.y + 5 })).toBeNull(); // no arcade door in the repos room
-    expect(doorAt('arcade', { x: ARCADE_EXIT.x + 5, y: ARCADE_EXIT.y + 5 })).toBe('store');
-    expect(doorAt('store', { x: 200, y: 165 })).toBeNull();
+    expect(doorAt('store', { x: REPOS_DOOR.x + 5, y: REPOS_DOOR.y + 5 })).toBe('repos');
+    expect(doorAt('store', { x: DOOR.x + 5, y: DOOR.y + 5 })).toBeNull(); // no arcade door in the skills room
+    expect(doorAt('arcade', { x: ARCADE_EXIT.x + 5, y: ARCADE_EXIT.y + 5 })).toBe('repos');
+    expect(doorAt('repos', { x: 200, y: 165 })).toBeNull();
   });
   it('spawnFor puts you at the door you came through, on walkable floor', () => {
-    expect(spawnFor('arcade', 'store')).toEqual(ARCADE_SPAWN);
-    expect(spawnFor('store', 'arcade')).toEqual(STORE_SPAWN_FROM_ARCADE);
+    expect(spawnFor('arcade', 'repos')).toEqual(ARCADE_SPAWN);
+    expect(spawnFor('repos', 'arcade')).toEqual(STORE_SPAWN_FROM_ARCADE);
     expect(spawnFor('repos', 'store').x).toBeGreaterThan(REPOS_DOOR.x);
     expect(spawnFor('store', 'repos').x).toBeGreaterThan(REPOS_DOOR.x);
-    for (const [to, from] of [['repos', 'store'], ['store', 'repos'], ['store', 'arcade'], ['arcade', 'store']] as const) {
+    for (const [to, from] of [['repos', 'store'], ['store', 'repos'], ['repos', 'arcade'], ['arcade', 'repos']] as const) {
       expect(isWalkable(spawnFor(to, from), to)).toBe(true);
     }
   });

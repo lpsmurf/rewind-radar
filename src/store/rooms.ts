@@ -1,12 +1,12 @@
 // Pure room routing: which room a place is in, where the clerk sends you, and the weekly shelf order.
 import type { Aisle, Genre, Room, Tape } from '../types';
-import { aisleOf, latestWeek, placeOf, roomOfTape } from '../types';
+import { DEFAULT_ROOM, aisleOf, latestWeek, placeOf, roomOfTape } from '../types';
 
-/** The room I end up in for an aisle. The arcade is its own room; an explicit room wins; else I stay (the arcade lands in skills). */
+/** The room I end up in for an aisle. The arcade is its own room; an explicit room wins; else I stay (the arcade lands in repos). */
 export function roomForAisle(aisle: Aisle, explicit: Room | undefined, current: Room): Room {
   if (aisle === 'arcade') return 'arcade';
   if (explicit) return explicit;
-  return current === 'arcade' ? 'store' : current;
+  return current === 'arcade' ? DEFAULT_ROOM : current;
 }
 
 /**

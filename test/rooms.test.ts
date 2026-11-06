@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { aisleOf, roomOfKind, roomOfTape, placeOf } from '../src/types.ts';
+import { DEFAULT_ROOM } from '../src/types.ts';
 import { clerkDestination, communityShelf, roomForAisle, standTapes, weeklyReleases } from '../src/store/rooms.ts';
 import { tapeFixture } from './helpers/tapes.ts';
 
@@ -32,11 +33,11 @@ describe('placeOf', () => {
 });
 
 describe('roomForAisle', () => {
-  it('arcade is its own room, an explicit room wins, otherwise stay (leaving the arcade lands in skills)', () => {
+  it('arcade is its own room, an explicit room wins, otherwise stay (leaving the arcade lands in repos)', () => {
     expect(roomForAisle('arcade', undefined, 'store')).toBe('arcade');
     expect(roomForAisle('Design', 'repos', 'store')).toBe('repos');
     expect(roomForAisle('Design', undefined, 'repos')).toBe('repos');
-    expect(roomForAisle('entrance', undefined, 'arcade')).toBe('store');
+    expect(roomForAisle('entrance', undefined, 'arcade')).toBe('repos');
   });
 });
 
@@ -53,9 +54,9 @@ describe('clerkDestination (the clerk says an aisle; the tape kind says the room
   it('community is always in the repos room', () => {
     expect(clerkDestination('community', [], null, 'store')).toEqual({ room: 'repos', aisle: 'community' });
   });
-  it('with no tape to go by, stay in the current room (from the arcade, go to skills)', () => {
+  it('with no tape to go by, stay in the current room (from the arcade, go to repos)', () => {
     expect(clerkDestination('Media', [], null, 'repos')).toEqual({ room: 'repos', aisle: 'Media' });
-    expect(clerkDestination('counter', [], null, 'arcade')).toEqual({ room: 'store', aisle: 'counter' });
+    expect(clerkDestination('counter', [], null, 'arcade')).toEqual({ room: 'repos', aisle: 'counter' });
   });
   it('NEW RELEASES is a repos-room shelf too', () => {
     expect(clerkDestination('new', [], null, 'store')).toEqual({ room: 'repos', aisle: 'new' });
@@ -108,5 +109,12 @@ describe('standTapes (what a genre stand holds)', () => {
   });
   it('the arcade has no stands', () => {
     expect(standTapes(all, 'Design', 'arcade')).toEqual([]);
+  });
+});
+
+describe('DEFAULT_ROOM', () => {
+  it('a new visitor starts in the repos room (the entrance); presence id store stays the skills room', () => {
+    expect(DEFAULT_ROOM).toBe('repos');
+    expect(roomOfKind('skill')).toBe('store');
   });
 });
