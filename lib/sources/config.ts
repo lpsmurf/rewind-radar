@@ -51,6 +51,24 @@ function list(v: unknown, max: number, what: string, ok: (s: string) => boolean,
   return out;
 }
 
+/** The weekly YouTube channels: any channel form, stored as the UC id when one is given, otherwise as the @handle. Repeats are dropped. */
+function youtubeChannels(v: unknown): string[] | string {
+  if (!Array.isArray(v)) return 'channels must be a list';
+  if (v.length > 10) return 'At most 10 channels';
+  const out: string[] = [];
+  const have = new Set<string>();
+  for (const x of v) {
+    const p = typeof x === 'string' ? parseChannelInput(x) : null;
+    if (!p) return CHANNEL_INPUT_HINT;
+    const c = 'handle' in p ? p.handle : p.channel_id;
+    const k = 'handle' in p ? c.toLowerCase() : c;
+    if (have.has(k)) continue;
+    have.add(k);
+    out.push(c);
+  }
+  return out;
+}
+
 /**
  * The watcher's list: the admin sends any channel form (see parseChannelInput); each is stored as `{ handle }` or `{ channel_id }`.
  * Whatever the watcher learned (resolved ids, uploads playlist, seen videos) is kept from `current` for entries that stay,
@@ -93,7 +111,7 @@ export function parseSourceConfig(key: ConfigKey, v: unknown, current?: unknown)
   }
   const queries = list(o.queries, 5, 'queries', (s) => s.length <= 100, 'text up to 100 characters');
   if (typeof queries === 'string') return { error: queries };
-  const channels = list(o.channels, 10, 'channels', (s) => CHANNEL.test(s), 'a YouTube channel id (UC plus 22 characters)');
+  const channels = youtubeChannels(o.channels);
   if (typeof channels === 'string') return { error: channels };
   if (!queries.length && !channels.length) return { error: 'Add at least one query or channel' };
   return { value: { queries, channels } };

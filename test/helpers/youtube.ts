@@ -9,10 +9,10 @@ export interface Vid {
 
 /**
  * Stub fetch for the YouTube Data API. `search(params)` returns the video ids one search.list call finds
- * (params = its query string as an object); `videos` is every video videos.list can describe. `fail` makes every call answer that status.
+ * (params = its query string as an object); `videos` is every video videos.list can describe; `handles` maps a handle to its channel id for channels.list?forHandle. `fail` makes every call answer that status.
  */
-export function stubYouTube(o: { search?: (p: Record<string, string>) => string[]; videos?: Vid[]; fail?: number }) {
-  const calls: { kind: 'search' | 'videos'; params: Record<string, string> }[] = [];
+export function stubYouTube(o: { search?: (p: Record<string, string>) => string[]; videos?: Vid[]; handles?: Record<string, string>; fail?: number }) {
+  const calls: { kind: 'search' | 'videos' | 'channels'; params: Record<string, string> }[] = [];
   vi.stubGlobal('fetch', async (input: unknown) => {
     const u = new URL(String(input));
     const params = Object.fromEntries(u.searchParams);
@@ -20,6 +20,11 @@ export function stubYouTube(o: { search?: (p: Record<string, string>) => string[
     if (u.pathname.endsWith('/search')) {
       calls.push({ kind: 'search', params });
       return new Response(JSON.stringify({ items: (o.search?.(params) ?? []).map((id) => ({ id: { videoId: id } })) }));
+    }
+    if (u.pathname.endsWith('/channels')) {
+      calls.push({ kind: 'channels', params });
+      const id = o.handles?.[params.forHandle];
+      return new Response(JSON.stringify({ items: id ? [{ id }] : [] }));
     }
     if (u.pathname.endsWith('/videos')) {
       calls.push({ kind: 'videos', params });

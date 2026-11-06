@@ -551,14 +551,23 @@ describe('GET and PUT /admin/config/:key', () => {
       { queries: ['x'.repeat(101)], channels: [] },
       { queries: [''], channels: [] },
       { queries: [5], channels: [] },
-      { queries: [], channels: ['UCshort'] },
-      { queries: [], channels: ['XX' + 'a'.repeat(22)] },
+      { queries: [], channels: ['not a channel'] },
+      { queries: [], channels: ['https://www.youtube.com/watch?v=dQw4w9WgXcQ'] },
+      { queries: [], channels: ['https://www.youtube.com/c/Name'] },
       { queries: [], channels: Array.from({ length: 11 }, (_, i) => 'UC' + String(i).padStart(22, 'a')) },
-      { queries: [], channels: [CHAN + 'x'] },
+      { queries: [], channels: [`https://www.youtube.com/channel/${CHAN}x`] },
       { queries: [], channels: [] },
     ];
     for (const b of bad) expect((await put('youtube', b)).status, JSON.stringify(b)).toBe(400);
     expect(writes(d, 'source_config', 'upsert')).toEqual([]);
+  });
+  it('normalises youtube channels: UC id for ids and links, @handle otherwise, repeats dropped', async () => {
+    cfgDb();
+    const r = await put('youtube', { queries: [], channels: [`https://www.youtube.com/channel/${CHAN}`, CHAN, 'https://www.youtube.com/@TheNextNewThingAI/videos', 'thenextnewthingai', '@Other'] });
+    expect(r.body).toEqual({ ok: true, key: 'youtube', value: { queries: [], channels: [CHAN, '@TheNextNewThingAI', '@Other'] } });
+    const bad = await put('youtube', { queries: [], channels: ['https://www.youtube.com/user/Name'] });
+    expect(bad.status).toBe(400);
+    expect(bad.body).toMatchObject({ error: 'Use a channel link, @handle or channel ID' });
   });
   it('accepts a channel-only or query-only youtube config', async () => {
     cfgDb();
