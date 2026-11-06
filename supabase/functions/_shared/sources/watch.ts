@@ -188,9 +188,16 @@ export async function watchChannels(ctx: WatchCtx): Promise<WatchSummary> {
       }
     }
   } finally {
-    const seen = [...cfg.seen, ...done].slice(-SEEN_MAX);
+    // The admin may have edited the list while we ran: merge into the row as it is now, never write back the list we started with.
     try {
-      await ctx.saveConfig('watch', { channels: cfg.channels, seen });
+      const now = asConfig(await ctx.config('watch'));
+      const ids = new Map(cfg.channels.filter((c) => c.channel_id && c.uploads).map((c) => [c.handle.toLowerCase(), c]));
+      const channels = now.channels.map((c) => {
+        const r = ids.get(c.handle.toLowerCase());
+        return c.channel_id && c.uploads ? c : r ? { ...c, channel_id: r.channel_id, uploads: r.uploads } : c;
+      });
+      const seen = [...new Set([...now.seen, ...done])].slice(-SEEN_MAX);
+      await ctx.saveConfig('watch', { channels, seen });
     } catch (e) {
       messages.push(`could not save the watch config: ${e instanceof Error ? e.message : e}`);
       sum.errors++;
