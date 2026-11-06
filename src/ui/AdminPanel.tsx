@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { API } from '../lib/api';
-import { adminHeaders, formatUsd, isChannelId, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, type SpendRow } from '../lib/adminPanel';
+import { adminHeaders, formatUsd, handlesOf, isChannelId, isHandle, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, watchSummaryLine, type SpendRow } from '../lib/adminPanel';
 
 const KEY = 'rr-admin-token'; // sessionStorage only: gone when the tab closes
 type Tab = 'queue' | 'add' | 'spend' | 'runs' | 'config';
@@ -251,8 +251,15 @@ function Config({ token, fail }: TabProps) {
   const [web, loadWeb] = useLoad<{ value: { query?: string } | null }>(token, 'admin/config/web', fail);
   const [queries, setQueries] = useState('');
   const [channels, setChannels] = useState('');
+  const [watch, loadWatch] = useLoad<{ value: { channels?: { handle: string }[] } | null }>(token, 'admin/config/watch', fail);
   const [query, setQuery] = useState('');
+  const [handles, setHandles] = useState('');
   const [msg, setMsg] = useState('');
+  const [running, setRunning] = useState(false);
+  const [runNote, setRunNote] = useState('');
+  useEffect(() => {
+    if (watch) setHandles((watch.value?.channels ?? []).map((c) => c.handle).join('\n'));
+  }, [watch]);
   useEffect(() => {
     if (yt) {
       setQueries((yt.value?.queries ?? []).join('\n'));
@@ -262,7 +269,7 @@ function Config({ token, fail }: TabProps) {
   useEffect(() => {
     if (web) setQuery(web.value?.query ?? '');
   }, [web]);
-  const save = async (key: 'youtube' | 'web', value: unknown, reload: () => void) => {
+  const save = async (key: 'youtube' | 'web' | 'watch', value: unknown, reload: () => void) => {
     setMsg('');
     try {
       await api(token, `admin/config/${key}`, value, 'PUT');
@@ -273,7 +280,21 @@ function Config({ token, fail }: TabProps) {
       else setMsg(e instanceof Error ? e.message : 'Failed');
     }
   };
-  if (!yt || !web) return <p className="small">Loading...</p>;
+  const runWatcher = async () => {
+    setRunning(true);
+    setRunNote('');
+    try {
+      setRunNote(watchSummaryLine(await api(token, 'admin/watch/run', {})));
+      loadWatch();
+    } catch (e) {
+      if (e instanceof Forbidden) fail(e);
+      else setRunNote(e instanceof Error ? e.message : 'Failed');
+    }
+    setRunning(false);
+  };
+  if (!yt || !web || !watch) return <p className="small">Loading...</p>;
+  const hs = handlesOf(handles);
+  const badHandles = hs.filter((h) => !isHandle(h));
   const qs = linesOf(queries);
   const chs = linesOf(channels);
   const badChannels = chs.filter((c) => !isChannelId(c));
@@ -287,6 +308,14 @@ function Config({ token, fail }: TabProps) {
       <h3>WEB SEARCH</h3>
       <label>WEEKLY QUERY (max 300 characters)<input value={query} maxLength={300} onChange={(e) => setQuery(e.target.value)} /></label>
       <button className="btn" disabled={!query.trim()} onClick={() => save('web', { query: query.trim() }, loadWeb)}>SAVE WEB</button>
+      <h3>WATCHED CHANNELS</h3>
+      <label>HANDLES (one per line, max 10, like @TheNextNewThingAI). New uploads are checked every 3 hours: repos the channel lists in its own comments go on the shelves.<textarea rows={3} value={handles} onChange={(e) => setHandles(e.target.value)} /></label>
+      {badHandles.length > 0 && <p className="err">Not a handle: {badHandles.join(', ')}</p>}
+      <div className="row">
+        <button className="btn" disabled={hs.length > 10 || badHandles.length > 0} onClick={() => save('watch', { channels: hs.map((handle) => ({ handle })) }, loadWatch)}>SAVE CHANNELS</button>
+        <button className="btn alt" disabled={running} onClick={runWatcher}>{running ? 'RUNNING...' : 'RUN WATCHER NOW'}</button>
+      </div>
+      {runNote && <p className="small">{runNote}</p>}
       {msg && <p className="small">{msg}</p>}
     </>
   );

@@ -151,3 +151,24 @@ describe('the watcher\'s stock path (live ctx)', () => {
     expect(batch.submit).toHaveBeenCalledWith(['acme/widget']);
   });
 });
+
+describe('PUT /admin/config/watch', () => {
+  const STORED = { channels: [{ handle: '@TheNextNewThingAI', channel_id: 'UC' + 'a'.repeat(22), uploads: 'UU' + 'a'.repeat(22) }], seen: ['v1'] };
+  const put = (body: unknown) => handle(new Request('http://localhost/api/admin/config/watch', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', 'x-forwarded-for': `10.6.0.${++ips}`, 'x-admin-token': 'open-sesame-open-sesame-open-sesame' },
+    body: JSON.stringify(body),
+  })).then(async (r) => ({ status: r.status, body: (await r.json()) as any }));
+  it('saves the new list but keeps seen and resolved ids for handles that stay', async () => {
+    const d = setup();
+    d.on('source_config', (q: Query) => (has(q, 'upsert') ? { data: null, error: null } : { data: { value: STORED }, error: null }));
+    const r = await put({ channels: [{ handle: '@TheNextNewThingAI' }, { handle: '@NewOne' }] });
+    expect(r.status).toBe(200);
+    expect(writes(d, 'source_config', 'upsert')).toEqual([{ key: 'watch', value: { channels: [STORED.channels[0], { handle: '@NewOne' }], seen: ['v1'] } }]);
+  });
+  it('400s a bad handle and writes nothing', async () => {
+    const d = setup();
+    expect((await put({ channels: ['nope'] })).status).toBe(400);
+    expect(writes(d, 'source_config', 'upsert')).toEqual([]);
+  });
+});

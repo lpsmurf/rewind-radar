@@ -74,3 +74,26 @@ export const linesOf = (text: string): string[] => [...new Set(text.split(/\r?\n
 
 /** A YouTube channel id, as the API route requires. */
 export const isChannelId = (s: string) => /^UC[\w-]{22}$/.test(s);
+
+/** A YouTube handle, as the config route requires (the leading @ included). */
+export const isHandle = (s: string) => /^@[A-Za-z0-9._-]{3,30}$/.test(s);
+
+/** What the watcher's textarea holds: one handle per line, a missing @ added, blanks and repeats (any case) dropped. */
+export function handlesOf(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim();
+    const h = t && !t.startsWith('@') ? `@${t}` : t;
+    if (!h || seen.has(h.toLowerCase())) continue;
+    seen.add(h.toLowerCase());
+    out.push(h);
+  }
+  return out;
+}
+
+/** The watcher's answer in one line for the panel. */
+export function watchSummaryLine(r: { skipped?: string; channels: number; videos_checked: number; repos_found: number; added: number; restored: number; duplicates: number; errors: number }): string {
+  if (r.skipped) return `Skipped: ${r.skipped}`;
+  return `${r.channels} channel${r.channels === 1 ? '' : 's'} · ${r.videos_checked} new video${r.videos_checked === 1 ? '' : 's'} · ${r.repos_found} repos found · added ${r.added} · restored ${r.restored} · already in store ${r.duplicates}${r.errors ? ` · ${r.errors} error${r.errors === 1 ? '' : 's'}` : ''}`;
+}

@@ -866,7 +866,9 @@ export async function handle(req: Request): Promise<Response> {
         const { data, error } = await db.from('source_config').select('value').eq('key', key).maybeSingle();
         return error ? json({ error: 'Could not read the config' }, 500) : json({ key, value: data?.value ?? null });
       }
-      const parsed = parseSourceConfig(key, body);
+      let current: unknown;
+      if (key === 'watch') current = (await db.from('source_config').select('value').eq('key', key).maybeSingle()).data?.value;
+      const parsed = parseSourceConfig(key, body, current);
       if ('error' in parsed) return json({ error: parsed.error }, 400);
       const { error } = await db.from('source_config').upsert({ key, value: parsed.value }, { onConflict: 'key' });
       return error ? json({ error: 'Could not save the config' }, 500) : json({ ok: true, key, value: parsed.value });
