@@ -24,10 +24,10 @@ export const SHELVES: Rect[] = [
   { x: 170, y: 238, w: 140, h: 26 },
 ];
 
-/** Doorway to the arcade, on the right of the store floor. */
+/** Doorway to the arcade, on the right of the repos room floor (the arcade is only reachable from there). */
 export const DOOR: Rect = { x: 404, y: 226, w: 66, h: 40 };
 
-/** Door to the other store room (REPOS from skills, SKILLS from repos): same spot in both, left of the arcade door. */
+/** Door to the other store room (SKILLS from repos, REPOS from skills): same spot in both; in repos it sits left of the arcade door. */
 export const REPOS_DOOR: Rect = { x: 330, y: 226, w: 66, h: 40 };
 
 /** Arcade room: five cabinets against the back wall, and the way back to the store. */
@@ -46,9 +46,9 @@ const obstaclesOf = obstaclesIn;
 
 export interface RoomDoor { rect: Rect; to: Room }
 export function doorsIn(room: Room): RoomDoor[] {
-  if (room === 'arcade') return [{ rect: ARCADE_EXIT, to: 'store' }];
-  if (room === 'repos') return [{ rect: REPOS_DOOR, to: 'store' }];
-  return [{ rect: DOOR, to: 'arcade' }, { rect: REPOS_DOOR, to: 'repos' }];
+  if (room === 'arcade') return [{ rect: ARCADE_EXIT, to: 'repos' }];
+  if (room === 'repos') return [{ rect: DOOR, to: 'arcade' }, { rect: REPOS_DOOR, to: 'store' }];
+  return [{ rect: REPOS_DOOR, to: 'repos' }];
 }
 /** The room a door under this point leads to, or null. */
 export const doorAt = (room: Room, p: Point): Room | null => doorsIn(room).find((d) => inRect(p, d.rect))?.to ?? null;
