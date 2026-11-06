@@ -32,3 +32,15 @@ export async function inStore(hits: RepoHit[]): Promise<Set<string>> {
 /** Store slugs (gh- and c-) of the visitor's own repos: a radar never recommends what they already made. */
 export const ownSlugs = (f: ProfileFacets): Set<string> => new Set(f.repos.flatMap((r) => tapeSlugs(`${f.owner}/${r.name}`)));
 export const dropOwn = <T extends { slug: string }>(rows: T[], own: Set<string>): T[] => rows.filter((r) => !own.has(r.slug.toLowerCase()));
+
+/**
+ * search_tapes ORs every word of a question, so one generic word ("user", "build") makes a tape a "match". A strong
+ * match shares at least half of the question's keywords (at least one), compared on word stems, so a plural or
+ * "-ing" form still counts. Only strong matches can make a GitHub top-up unnecessary.
+ */
+export function strongMatch(row: Pick<CatalogRow, 'title' | 'blurb' | 'genre' | 'match'>, terms: string[]): boolean {
+  if (!row.match || !terms.length) return false;
+  const hay = `${row.title} ${row.blurb} ${row.genre}`.toLowerCase();
+  const need = Math.max(1, Math.ceil(terms.length / 2));
+  return terms.filter((t) => hay.includes(t.slice(0, Math.max(4, t.length - 3)))).length >= need;
+}

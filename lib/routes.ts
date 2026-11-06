@@ -1,11 +1,11 @@
 import { admin } from './admin.ts';
 import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, healthSignals, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
-import { candidates, dropOwn, inStore, ownSlugs, type CatalogRow } from './catalog.ts';
+import { candidates, dropOwn, inStore, ownSlugs, strongMatch, type CatalogRow } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
-import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef, profileQueries, searchRepos, type RepoFacts, type RepoHit } from './github.ts';
+import { fetchProfile, fetchRepo, fetchRepoFacts, GitHubError, parseRepoRef, profileQueries, searchRepos, searchTerms, type RepoFacts, type RepoHit } from './github.ts';
 import { collectAssessBatches, submitAssessBatch } from './batchAssess.ts';
 import { buildMonthlyPicks, previousMonth } from './monthly.ts';
 import { refreshRadar } from './radar.ts';
@@ -140,8 +140,8 @@ const GH_TOPUP = { ident: 20, ip: 40 };
 const STORE_ENOUGH = 3; // store text matches that make a GitHub search unnecessary
 
 /** GitHub repos for a question the store answers weakly. [] when the store is enough, the visitor is over a limit, or GitHub is unavailable. */
-async function githubTopUp(text: string, rows: { match?: boolean }[], who: string, idKey: string): Promise<RepoHit[]> {
-  if (rows.filter((r) => r.match).length >= STORE_ENOUGH) return [];
+async function githubTopUp(text: string, rows: CatalogRow[], who: string, idKey: string): Promise<RepoHit[]> {
+  if (rows.filter((r) => strongMatch(r, searchTerms(text))).length >= STORE_ENOUGH) return [];
   if (limited('ghsearch:' + who, GH_TOPUP.ip, true) || limited(`ghsearch:${idKey}`, GH_TOPUP.ident, true)) return [];
   limited('ghsearch:' + who, GH_TOPUP.ip);
   limited(`ghsearch:${idKey}`, GH_TOPUP.ident);

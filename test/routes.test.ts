@@ -154,6 +154,22 @@ describe('POST /clerk: store first, then GitHub', () => {
     expect(JSON.stringify(create.mock.calls[0][0].system)).toMatch(/Prefer store tapes/);
   });
 
+  it('ignores store "matches" that share only one generic word with a longer question (the live bug)', async () => {
+    const d = setup();
+    // search_tapes ORs every word, so tapes mentioning just "user" or "building" come back with match=true
+    const loose = [
+      { slug: 'user-research', title: 'User Research', genre: 'Research', blurb: 'interview users', kind: 'skill', match: true },
+      { slug: 'build-checklist', title: 'Build checklist', genre: 'Ops', blurb: 'building releases', kind: 'skill', match: true },
+      { slug: 'ux-copy', title: 'UX copy', genre: 'Design', blurb: 'user interface text', kind: 'skill', match: true },
+    ];
+    d.on('rpc:search_tapes', () => ({ data: loose, error: null }));
+    const urls = stubSearch([searchItem('ratatui/ratatui', { stargazers_count: 19000 })]);
+    create.mockResolvedValue(reply(['gh:ratatui/ratatui']));
+    const r = await post('clerk', { question: 'a rust library for building terminal user interfaces', visitorId: vid() });
+    expect(urls).toHaveLength(1);
+    expect(r.body.github.map((h: any) => h.full_name)).toEqual(['ratatui/ratatui']);
+  });
+
   it('keeps the total at 5, store tapes first', async () => {
     const d = setup();
     d.on('rpc:search_tapes', () => ({ data: strong(2), error: null }));
