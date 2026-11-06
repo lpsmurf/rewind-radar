@@ -52,27 +52,30 @@ function list(v: unknown, max: number, what: string, ok: (s: string) => boolean,
 }
 
 /**
- * The watcher's list: only handles come from the admin. Whatever the watcher learned (resolved ids, seen videos) is kept from
- * `current` for handles that stay, so saving the list never makes it re-resolve or re-stock.
+ * The watcher's list: the admin sends any channel form (see parseChannelInput); each is stored as `{ handle }` or `{ channel_id }`.
+ * Whatever the watcher learned (resolved ids, uploads playlist, seen videos) is kept from `current` for entries that stay,
+ * so saving the list never makes it re-resolve or re-stock.
  */
 function parseWatch(o: Record<string, unknown>, current: unknown): { value: Record<string, unknown> } | { error: string } {
   if (!Array.isArray(o.channels)) return { error: 'channels must be a list' };
   if (o.channels.length > MAX_WATCH) return { error: `At most ${MAX_WATCH} channels` };
   const cur = current && typeof current === 'object' ? (current as Record<string, unknown>) : {};
-  const old = (Array.isArray(cur.channels) ? cur.channels : []).filter((c: any) => c && typeof c.handle === 'string') as Record<string, unknown>[];
+  const old = (Array.isArray(cur.channels) ? cur.channels : []).filter((c: any) => c && (typeof c.handle === 'string' || typeof c.channel_id === 'string')) as Record<string, unknown>[];
+  const keyOf = (c: { handle?: unknown; channel_id?: unknown }) => (typeof c.handle === 'string' ? `h:${c.handle.toLowerCase()}` : `c:${String(c.channel_id)}`);
   const channels: Record<string, unknown>[] = [];
   const have = new Set<string>();
   for (const x of o.channels) {
-    const h = (typeof x === 'string' ? x : x && typeof x === 'object' ? (x as Record<string, unknown>).handle : '');
-    const handle = typeof h === 'string' ? h.trim() : '';
-    if (!HANDLE.test(handle)) return { error: 'Each channel must be a handle like @TheNextNewThingAI' };
-    if (have.has(handle.toLowerCase())) continue;
-    have.add(handle.toLowerCase());
-    const prev = old.find((c) => String(c.handle).toLowerCase() === handle.toLowerCase());
-    channels.push({
-      handle,
-      ...(prev && typeof prev.channel_id === 'string' && typeof prev.uploads === 'string' ? { channel_id: prev.channel_id, uploads: prev.uploads } : {}),
-    });
+    const raw = typeof x === 'string' ? x : x && typeof x === 'object' ? ((x as Record<string, unknown>).handle ?? (x as Record<string, unknown>).channel_id) : '';
+    const p = typeof raw === 'string' ? parseChannelInput(raw) : null;
+    if (!p) return { error: CHANNEL_INPUT_HINT };
+    const entry: Record<string, unknown> = 'handle' in p ? { handle: p.handle } : { channel_id: p.channel_id };
+    const k = keyOf(entry);
+    if (have.has(k)) continue;
+    have.add(k);
+    const prev = old.find((c) => keyOf(c) === k);
+    if (prev && typeof prev.uploads === 'string' && (typeof prev.channel_id === 'string')) {
+      channels.push({ ...entry, channel_id: prev.channel_id, uploads: prev.uploads });
+    } else channels.push(entry);
   }
   const seen = (Array.isArray(cur.seen) ? cur.seen : []).filter((s): s is string => typeof s === 'string').slice(-300);
   return { value: { channels, seen } };

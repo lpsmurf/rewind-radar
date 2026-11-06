@@ -45,6 +45,29 @@ describe('watchChannels', () => {
     expect(calls.filter((c) => c.kind === 'playlistItems')[1].params).toMatchObject({ playlistId: UPLOADS, part: 'contentDetails,snippet', maxResults: '5' });
   });
 
+  it('resolves a channel_id-only entry with channels.list?id and stores its uploads', async () => {
+    const calls = api([vid('v1', 72)], { v1: [owner('https://github.com/a/one')] });
+    const s = setup({ watch: { channels: [{ channel_id: CH }], seen: [] } });
+    const r = await watchChannels(s.ctx);
+    const ch = calls.filter((c) => c.kind === 'channels');
+    expect(ch).toHaveLength(1);
+    expect(ch[0].params).toMatchObject({ id: CH, part: 'contentDetails', key: 'test-key' });
+    expect(ch[0].params.forHandle).toBeUndefined();
+    expect(s.stocked.map((x) => x.repo)).toEqual(['a/one']);
+    expect(r.errors).toBe(0);
+    expect((s.store.watch as any).channels).toEqual([{ channel_id: CH, uploads: UPLOADS }]);
+    await watchChannels(s.ctx);
+    expect(calls.filter((c) => c.kind === 'channels')).toHaveLength(1);
+  });
+
+  it('reports an unknown channel_id by id, and keeps going', async () => {
+    api([]);
+    const s = setup({ watch: { channels: [{ channel_id: 'UC' + 'q'.repeat(22) }], seen: [] } });
+    const r = await watchChannels(s.ctx);
+    expect(r.errors).toBe(1);
+    expect(r.messages?.[0]).toContain('UC' + 'q'.repeat(22));
+  });
+
   it('reads only the owner\'s comments and replies, never other commenters\' links', async () => {
     api([vid('v1', 72)], {
       v1: [

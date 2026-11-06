@@ -48,7 +48,7 @@ export interface WatchThread {
 }
 
 /**
- * Stub fetch for the channel watcher: channels.list (forHandle), playlistItems.list and commentThreads.list.
+ * Stub fetch for the channel watcher: channels.list (forHandle or id), playlistItems.list and commentThreads.list.
  * `handles` maps a handle to its channel id; the uploads playlist of channel `UCx` is `UUx`. `uploads` maps a playlist id to its videos,
  * `threads` a video id to its comment threads. playlistItems pages by `maxResults` and `pageToken` (an offset) and sets `nextPageToken`, newest video first as listed. `fail(kind, params)` returns an HTTP status to make that call fail.
  */
@@ -72,7 +72,8 @@ export function stubWatchApi(o: {
       return new Response(JSON.stringify({ error: { message: 'boom', errors: [{ reason }] } }), { status: code });
     }
     if (kind === 'channels') {
-      const id = o.handles?.[params.forHandle];
+      // forHandle looks a handle up; id (part=contentDetails) looks a channel id up
+      const id = params.id ? (Object.values(o.handles ?? {}).includes(params.id) ? params.id : undefined) : o.handles?.[params.forHandle];
       return new Response(JSON.stringify({ items: id ? [{ id, contentDetails: { relatedPlaylists: { uploads: 'UU' + id.slice(2) } } }] : [] }));
     }
     if (kind === 'playlistItems') {

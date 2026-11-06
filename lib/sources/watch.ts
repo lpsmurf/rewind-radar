@@ -5,8 +5,8 @@ import { parseRepoRef } from '../github.ts';
  * Channel watcher: for each channel in source_config 'watch', find uploads from the last 14 days we have not processed, read the
  * comments the channel itself wrote (creators list their repos there) plus the description, and stock every GitHub repo linked.
  *
- * Quota (YouTube Data API v3, 10,000 units a day, every call below is 1 unit): channels.list once per channel ever (handle
- * resolution is cached), playlistItems.list once per channel per run, commentThreads.list once per new video. A run over one channel
+ * Quota (YouTube Data API v3, 10,000 units a day, every call below is 1 unit): channels.list once per channel ever (resolving a
+ * handle with forHandle, or a channel id with id, is cached), playlistItems.list once per channel per run, commentThreads.list once per new video. A run over one channel
  * with one new video is 2 units (3 the first time); a 3-hourly schedule is about 8 to 24 units a day.
  */
 const API = 'https://www.googleapis.com/youtube/v3';
@@ -21,7 +21,8 @@ const RUN_CAP = 25; // repos stocked per run
 const MAX_CHANNELS = 10;
 
 export interface WatchChannel {
-  handle: string;
+  /** Either a handle or a channel_id names the channel; the watcher fills in the rest. */
+  handle?: string;
   channel_id?: string;
   uploads?: string;
 }
@@ -110,12 +111,15 @@ async function ownerComments(videoId: string, channelId: string, key: string): P
   return out.join('\n');
 }
 
+const label = (c: WatchChannel): string => c.handle ?? c.channel_id ?? '';
+const keyOf = (c: WatchChannel): string => (c.handle ? `h:${c.handle.toLowerCase()}` : `c:${c.channel_id}`);
+
 const asConfig = (v: unknown): WatchConfig => {
   const o = v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
   const channels = (Array.isArray(o.channels) ? o.channels : [])
-    .filter((c: any) => c && typeof c.handle === 'string' && c.handle)
+    .filter((c: any) => c && ((typeof c.handle === 'string' && c.handle) || (typeof c.channel_id === 'string' && c.channel_id)))
     .slice(0, MAX_CHANNELS)
-    .map((c: any): WatchChannel => ({ handle: c.handle, ...(typeof c.channel_id === 'string' ? { channel_id: c.channel_id } : {}), ...(typeof c.uploads === 'string' ? { uploads: c.uploads } : {}) }));
+    .map((c: any): WatchChannel => ({ ...(typeof c.handle === 'string' && c.handle ? { handle: c.handle } : {}), ...(typeof c.channel_id === 'string' ? { channel_id: c.channel_id } : {}), ...(typeof c.uploads === 'string' ? { uploads: c.uploads } : {}) }));
   return { channels, seen: (Array.isArray(o.seen) ? o.seen : []).filter((s): s is string => typeof s === 'string') };
 };
 
@@ -140,10 +144,12 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
       if (halted) break;
       try {
         if (!ch.channel_id || !ch.uploads) {
-          const r = await api('channels', { part: 'id,contentDetails', forHandle: ch.handle, key });
+          const r = ch.handle
+            ? await api('channels', { part: 'id,contentDetails', forHandle: ch.handle, key })
+            : await api('channels', { part: 'contentDetails', id: ch.channel_id!, key });
           const item = r.items?.[0];
           const uploads = item?.contentDetails?.relatedPlaylists?.uploads;
-          if (typeof item?.id !== 'string' || typeof uploads !== 'string') throw new Error(`no YouTube channel for ${ch.handle}`);
+          if (typeof item?.id !== 'string' || typeof uploads !== 'string') throw new Error(`no YouTube channel for ${label(ch)}`);
           ch.channel_id = item.id;
           ch.uploads = uploads;
         }
@@ -185,7 +191,7 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
           checked++;
           sum.videos_checked++;
           const title = String(it.snippet?.title ?? '');
-          const channelTitle = String(it.snippet?.videoOwnerChannelTitle ?? it.snippet?.channelTitle ?? ch.handle);
+          const channelTitle = String(it.snippet?.videoOwnerChannelTitle ?? it.snippet?.channelTitle ?? label(ch));
           const commentText = await ownerComments(id, ch.channel_id!, key);
           const comments = watchRepoLinks(commentText);
           const repos = watchRepoLinks(`${commentText}\n${String(it.snippet?.description ?? '')}`);
@@ -218,16 +224,16 @@ export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {})
         }
       } catch (e) {
         sum.errors++;
-        messages.push(`${ch.handle}: ${e instanceof Error ? e.message : e}`);
+        messages.push(`${label(ch)}: ${e instanceof Error ? e.message : e}`);
       }
     }
   } finally {
     // The admin may have edited the list while we ran: merge into the row as it is now, never write back the list we started with.
     try {
       const now = asConfig(await ctx.config('watch'));
-      const ids = new Map(cfg.channels.filter((c) => c.channel_id && c.uploads).map((c) => [c.handle.toLowerCase(), c]));
+      const ids = new Map(cfg.channels.filter((c) => c.channel_id && c.uploads).map((c) => [keyOf(c), c]));
       const channels = now.channels.map((c) => {
-        const r = ids.get(c.handle.toLowerCase());
+        const r = ids.get(keyOf(c));
         return c.channel_id && c.uploads ? c : r ? { ...c, channel_id: r.channel_id, uploads: r.uploads } : c;
       });
       const seen = [...new Set([...now.seen, ...done])].slice(-SEEN_MAX);

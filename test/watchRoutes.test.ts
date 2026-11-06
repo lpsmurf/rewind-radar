@@ -168,7 +168,7 @@ describe('PUT /admin/config/watch', () => {
   });
   it('400s a bad handle and writes nothing', async () => {
     const d = setup();
-    expect((await put({ channels: ['nope'] })).status).toBe(400);
+    expect((await put({ channels: ['not a channel'] })).status).toBe(400);
     expect(writes(d, 'source_config', 'upsert')).toEqual([]);
   });
 });
