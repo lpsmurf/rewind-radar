@@ -1,9 +1,9 @@
 // Back-wall shelf geometry (pure). Six boxes per row leave room for a star label under each box.
 export interface WallShelf { x: number; w: number; x0: number; pitch: number; perRow: number }
 export const WALL_SHELVES: Record<'weekly' | 'monthly' | 'community', WallShelf> = {
-  weekly: { x: 4, w: 138, x0: 10, pitch: 23, perRow: 6 },
-  monthly: { x: 148, w: 92, x0: 154, pitch: 23, perRow: 4 },
-  community: { x: 250, w: 92, x0: 256, pitch: 23, perRow: 4 },
+  weekly: { x: 4, w: 150, x0: 10, pitch: 25, perRow: 6 },
+  monthly: { x: 158, w: 98, x0: 164, pitch: 25, perRow: 4 },
+  community: { x: 262, w: 98, x0: 268, pitch: 25, perRow: 4 },
 };
 /** The TV on the back wall (right of the shelves). */
 export const TV_RECT = { x: 370, y: 12, w: 96, h: 68 };

@@ -1,3 +1,5 @@
+import { formatStars } from '../lib/stars';
+
 // A tiny 3x5 bitmap font (digits, k, M, '.') and a 3x3 star, for shelf-spine star counts that the 6px font cannot fit.
 export const GLYPHS: Record<string, string[]> = {
   '0': ['111', '101', '101', '101', '111'], '1': ['010', '110', '010', '010', '111'],
@@ -30,6 +32,13 @@ export function drawPixelText(g: CanvasRenderingContext2D, s: string, x: number,
 
 /** Width of a star sprite, a gap and the label. */
 export const starCountWidth = (label: string): number => 6 + textWidth(label);
+
+/** The count for a wall label under the sprite: the shared formatter uppercased; whole thousands only when that cannot fit `maxWidth`. */
+export function wallStarLabel(n: number, maxWidth: number): string {
+  const full = formatStars(n).toUpperCase();
+  if (starCountWidth(full) <= maxWidth) return full;
+  return formatStars(Math.round(n / 1000) * 1000).toUpperCase();
+}
 
 /** Draw the star sprite with its top-left at (x, y). */
 export function drawStar(g: CanvasRenderingContext2D, x: number, y: number, color = '#ffd200'): void {

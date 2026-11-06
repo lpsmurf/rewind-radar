@@ -92,6 +92,32 @@ describe('search cache, dedupe, errors and ceiling', () => {
     warn.mockRestore();
   });
 
+  it('drops hits whose url is not a plain github.com/owner/repo', async () => {
+    stubSearch([
+      searchItem('a/b'),
+      searchItem('evil/site', { html_url: 'https://evil.com/evil/site' }),
+      searchItem('js/x', { html_url: 'javascript:alert(1)' }),
+      searchItem('deep/path', { html_url: 'https://github.com/deep/path/issues' }),
+      searchItem('bad name/x'),
+    ]);
+    expect((await searchRepos('mcp server')).map((h) => h.full_name)).toEqual(['a/b']);
+  });
+
+  it('allows 10 real searches a minute per visitor on top of the global ceiling; others are not affected', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const urls = stubSearch([searchItem('a/b')]);
+    for (let i = 0; i < 10; i++) await searchRepos(`kw${i}`, { who: '1.2.3.4' });
+    expect(urls).toHaveLength(10);
+    expect(await searchRepos('kw-over', { who: '1.2.3.4' })).toEqual([]);
+    expect(urls).toHaveLength(10);
+    expect(await searchRepos('kw3', { who: '1.2.3.4' })).toHaveLength(1); // cache hits do not count
+    expect(await searchRepos('kw-other', { who: '5.6.7.8' })).toHaveLength(1);
+    vi.advanceTimersByTime(61_000);
+    expect(await searchRepos('kw-over', { who: '1.2.3.4' })).toHaveLength(1);
+    warn.mockRestore();
+  });
+
   it('keeps the cache bounded at 500 entries', async () => {
     vi.useFakeTimers();
     const urls = stubSearch([searchItem('a/b')]);

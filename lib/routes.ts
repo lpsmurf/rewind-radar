@@ -1,7 +1,7 @@
 import { admin } from './admin.ts';
 import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, healthSignals, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
-import { candidates, inStore, type CatalogRow } from './catalog.ts';
+import { candidates, dropOwn, inStore, ownSlugs, type CatalogRow } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
 import { classifyQuestion, CLERK_LINES } from './clerkGuard.ts';
 import { whoIs } from './identity.ts';
@@ -145,15 +145,15 @@ async function githubTopUp(text: string, rows: { match?: boolean }[], who: strin
   if (limited('ghsearch:' + who, GH_TOPUP.ip, true) || limited(`ghsearch:${idKey}`, GH_TOPUP.ident, true)) return [];
   limited('ghsearch:' + who, GH_TOPUP.ip);
   limited(`ghsearch:${idKey}`, GH_TOPUP.ident);
-  const hits = await searchRepos(text, { limit: 8 }); // never throws
+  const hits = await searchRepos(text, { limit: 8, who }); // never throws
   if (!hits.length) return [];
   const have = await inStore(hits);
   return hits.filter((h) => !have.has(h.full_name.toLowerCase()));
 }
 
 /** GitHub repos for a profile radar: up to 2 searches, minus the visitor's own repos and anything the store already has. */
-async function profileHits(prof: NonNullable<Awaited<ReturnType<typeof fetchProfile>>>): Promise<RepoHit[]> {
-  const found = (await Promise.all(profileQueries(prof.facets).map((q) => searchRepos(q.text, { limit: 10, language: q.language })))).flat();
+async function profileHits(prof: NonNullable<Awaited<ReturnType<typeof fetchProfile>>>, who: string): Promise<RepoHit[]> {
+  const found = (await Promise.all(profileQueries(prof.facets).map((q) => searchRepos(q.text, { limit: 10, language: q.language, who })))).flat();
   const owner = prof.facets.owner.toLowerCase();
   const mine = new Set(prof.facets.repos.map((r) => `${owner}/${r.name}`.toLowerCase()));
   const uniq = new Map<string, RepoHit>();
@@ -302,10 +302,11 @@ export async function handle(req: Request): Promise<Response> {
       const cols = 'slug,title,genre,blurb,kind';
       const [repoRows, skillRows] = await Promise.all([
         admin().from('tapes').select(cols).eq('archived', false).in('kind', ['repo', 'community']).order('created_at', { ascending: false }).limit(250),
-        admin().from('tapes').select(cols).eq('archived', false).eq('kind', 'skill').limit(120),
+        admin().from('tapes').select(cols).eq('archived', false).eq('kind', 'skill').order('rentals', { ascending: false }).order('created_at', { ascending: false }).limit(120),
       ]);
       if (repoRows.error || skillRows.error) return json({ error: 'Catalog unavailable' }, 500);
-      const catalog = [...(repoRows.data ?? []), ...(skillRows.data ?? [])] as CatalogRow[];
+      const own = ownSlugs(prof.facets); // never offer the visitor their own repos as tapes
+      const catalog = dropOwn([...(repoRows.data ?? []), ...(skillRows.data ?? [])] as CatalogRow[], own);
       if (!(await budgetLeft())) return json({ error: CLERK_LINES.budgetBusy }, 503);
       let slot;
       try {
@@ -322,12 +323,14 @@ export async function handle(req: Request): Promise<Response> {
       const used: [string, Parameters<OnUsage>[1]][] = [];
       let rec;
       try {
-        const hits = await profileHits(prof);
+        const hits = await profileHits(prof, who);
         rec = await recommendForProfile(prof.text, catalog, hits, (m, u) => used.push([m, u]));
       } finally {
         if (used.length) await slot.settle(used[used.length - 1][0], sumUsage(used.map(([, u]) => u)));
         else await slot.release(); // nothing was billed
       }
+      rec.repos = rec.repos.filter((p) => p.type !== 'tape' || !own.has(p.slug.toLowerCase())); // and again, whatever the model said
+      rec.skills = rec.skills.filter((x) => !own.has(x.slug.toLowerCase()));
       const picks = rec.repos.map((p) =>
         p.type === 'tape'
           ? { type: 'tape' as const, slug: p.slug, why: p.why }

@@ -1,5 +1,5 @@
 import { admin } from './admin.ts';
-import { AssessError, assessRepoAI, costUsd, fitForVisitor, sanitizeUntrusted, SONNET, type OnUsage } from './ai.ts';
+import { AssessError, assessRepoAI, costUsd, fitForVisitor, PROFILE_CAPS, sanitizeUntrusted, SONNET, type OnUsage } from './ai.ts';
 import { candidates } from './catalog.ts';
 import { env } from './env.ts';
 import { fetchProfile, fetchRepoFacts, repoExists, type RepoFacts, type RepoRef } from './github.ts';
@@ -222,10 +222,16 @@ export async function reserve(
  * Reservation defaults are the worst case, because settle() swaps the estimate for the real cost and a burst of N
  * calls could otherwise overshoot by N x (actual - estimate). Sonnet is $2 in / $10 out per 1M tokens (PRICES in ai.ts):
  * assess = ~12k input tokens (README + facts + candidates) + max_tokens 8000 = 0.024 + 0.080 = 0.104 -> 0.12;
- * profile = ~25k input tokens (370 store lines + 20 GitHub lines + 6000-char profile) + max_tokens 1500 = 0.050 + 0.015 = 0.065 -> 0.07.
+ * profile = worst case of the real prompt caps: 6000 (profile) + 40000 (store repos) + 40000 (skills) + 8000 (20 GitHub lines) + 3000 (system)
+ *   = 97000 chars; at a pessimistic 3 chars/token = 32334 input tokens = $0.0647, plus max_tokens 1500 = $0.015 -> $0.0797 -> 0.08.
  */
 export const ASSESS_RESERVE_USD = 0.12;
-export const PROFILE_RESERVE_USD = 0.07;
+/** The profile route's worst-case cost from its prompt caps (see above). */
+export const profileWorstCaseUsd = (): number => {
+  const chars = PROFILE_CAPS.profile + PROFILE_CAPS.store + PROFILE_CAPS.skills + PROFILE_CAPS.hits + PROFILE_CAPS.system;
+  return costUsd(SONNET, { input_tokens: Math.ceil(chars / 3), output_tokens: PROFILE_CAPS.maxTokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 });
+};
+export const PROFILE_RESERVE_USD = 0.08;
 
 const reserveAssess = (key: string) =>
   reserve('assess', {

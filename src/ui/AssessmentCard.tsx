@@ -1,5 +1,6 @@
 import type { Assessment, ClerkReply, GateKey, RepoSummary, Tape } from '../types';
 import { RING_COLORS } from '../types';
+import { formatStars } from '../lib/stars';
 
 const GATES: [GateKey, string][] = [
   ['licence', 'LICENCE'],
@@ -45,7 +46,7 @@ export default function AssessmentCard({ reply, tapes, onOpen, onShelve }: {
 
       {repo && (
         <div className="facts">
-          <span>★ {repo.stars}</span>
+          <span>★ {formatStars(repo.stars)}</span>
           <span>{repo.license || 'no licence'}</span>
           {repo.language && <span>{repo.language}</span>}
           <span>pushed {repo.signals.days_since_push}d ago</span>

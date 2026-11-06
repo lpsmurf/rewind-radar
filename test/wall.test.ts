@@ -20,6 +20,8 @@ describe('back-wall shelves', () => {
       // widest label we expect on a spine: 999K, with the star sprite, still leaves a gap of 2px
       expect(starCountWidth(formatStars(999000).toUpperCase())).toBeLessThanOrEqual(sh.pitch - 2);
       expect(starCountWidth(formatStars(1200000).toUpperCase())).toBeLessThanOrEqual(sh.pitch - 2);
+      // the widest real labels (12.4K, 99.9K, 100K) keep the sprite and a 2px gap
+      for (const n of [12400, 99900, 100000, 640]) expect(starCountWidth(formatStars(n).toUpperCase())).toBeLessThanOrEqual(sh.pitch - 2);
     }
   });
   it('shelves do not overlap each other or the TV', () => {

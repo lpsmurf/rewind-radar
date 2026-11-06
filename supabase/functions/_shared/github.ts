@@ -175,6 +175,7 @@ export const clearRepoExistsCache = () => {
   searches.clear();
   searching.clear();
   searchTimes.length = 0;
+  visitorSearches.clear();
 };
 
 /**
@@ -275,6 +276,9 @@ const SEARCH_PER_MINUTE = 25; // GitHub allows 30 a minute; the ceiling is per i
 const searches = new Map<string, { at: number; hits: RepoHit[] }>(); // insertion order = age
 const searching = new Map<string, Promise<RepoHit[]>>(); // concurrent identical searches share one call
 const searchTimes: number[] = [];
+const SEARCH_PER_VISITOR = 10; // real searches a minute for one visitor (client IP), on top of the global ceiling
+const visitorSearches = new Map<string, number[]>();
+const VISITOR_KEYS_MAX = 2000;
 
 const STOP = new Set(
   ('a an and are as at be by can for from get how i in is it me my of on or that the this to want what which with you ' +
@@ -301,6 +305,11 @@ export function searchQuery(terms: string[], language?: string | null, now = Dat
   return `${terms.join(' ')}${lang} stars:>30 archived:false pushed:>${since}`.trim();
 }
 
+/** Only plain github.com/owner/repo links reach the UI (a search result is untrusted input). */
+const GITHUB_URL = /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+$/;
+const FULL_NAME = /^[\w.-]+\/[\w.-]+$/;
+const goodHit = (it: any): boolean => !!it && FULL_NAME.test(String(it.full_name)) && GITHUB_URL.test(String(it.html_url)) && !it.archived;
+
 const toHit = (it: any): RepoHit => ({
   full_name: String(it.full_name),
   html_url: String(it.html_url),
@@ -321,7 +330,7 @@ const toHit = (it: any): RepoHit => ({
  * concurrent searches share one call, and at most 25 real calls a minute leave this isolate. Never throws: a refusal
  * (403/429/5xx), a network error or the ceiling gives [] and a warning.
  */
-export async function searchRepos(q: string, o: { limit?: number; language?: string | null } = {}): Promise<RepoHit[]> {
+export async function searchRepos(q: string, o: { limit?: number; language?: string | null; who?: string } = {}): Promise<RepoHit[]> {
   const terms = searchTerms(q);
   const limit = Math.min(Math.max(Math.floor(o.limit ?? 8), 1), 30);
   if (!terms.length && !o.language) return [];
@@ -336,6 +345,17 @@ export async function searchRepos(q: string, o: { limit?: number; language?: str
     console.warn('[github:search] per-minute ceiling reached, skipping');
     return [];
   }
+  if (o.who) { // per-visitor limit: checked before anything is counted, cache hits never reach here
+    const mine = (visitorSearches.get(o.who) ?? []).filter((t) => now - t < 60_000);
+    if (mine.length >= SEARCH_PER_VISITOR) {
+      console.warn('[github:search] per-visitor limit reached, skipping');
+      return [];
+    }
+    mine.push(now);
+    visitorSearches.delete(o.who);
+    visitorSearches.set(o.who, mine);
+    if (visitorSearches.size > VISITOR_KEYS_MAX) visitorSearches.delete(visitorSearches.keys().next().value as string);
+  }
   searchTimes.push(now);
   const p = (async () => {
     try {
@@ -343,7 +363,7 @@ export async function searchRepos(q: string, o: { limit?: number; language?: str
       const r = await fetch(url, { headers: headers() });
       if (!r.ok) throw new GitHubError(r.status);
       const j: any = await r.json();
-      const hits = (Array.isArray(j.items) ? j.items : []).filter((it: any) => it && it.full_name && it.html_url && !it.archived).slice(0, limit).map(toHit);
+      const hits = (Array.isArray(j.items) ? j.items : []).filter(goodHit).slice(0, limit).map(toHit);
       searches.delete(key);
       searches.set(key, { at: Date.now(), hits });
       if (searches.size > SEARCH_MAX) searches.delete(searches.keys().next().value as string);

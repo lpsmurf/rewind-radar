@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { itemKey, itemStars, itemTitle, neighbourWindow, shortTitle, stepIndex, positionLabel, type BrowseItem } from '../src/ui/releasesNav.ts';
+import { isTypingTarget, itemKey, itemStars, itemTitle, neighbourWindow, shortTitle, stepIndex, positionLabel, type BrowseItem } from '../src/ui/releasesNav.ts';
 import { tapeFixture } from './helpers/tapes.ts';
 
 describe('stepIndex (wraps around)', () => {
@@ -33,7 +33,9 @@ describe('neighbourWindow', () => {
       expect(all.length).toBe(Math.min(n - 1, 6) < 0 ? 0 : Math.min(Math.max(n - 1, 0), 6));
     }
     expect(neighbourWindow(3, 0, 3)).toEqual({ left: [2], right: [1] });
-    expect(neighbourWindow(2, 0, 3)).toEqual({ left: [1], right: [] });
+    expect(neighbourWindow(2, 0, 3)).toEqual({ left: [], right: [1] }); // the one neighbour is on the right: never the same tape both sides
+    expect(neighbourWindow(2, 1, 3)).toEqual({ left: [], right: [0] });
+    expect(neighbourWindow(4, 0, 3)).toEqual({ left: [3], right: [1, 2] });
     expect(neighbourWindow(1, 0, 3)).toEqual({ left: [], right: [] });
   });
 });
@@ -60,5 +62,15 @@ describe('browse items: a store tape or a light GitHub repo', () => {
   it('shortTitle drops the owner and truncates with a dot', () => {
     expect(shortTitle(tape, 20)).toBe('widget-kit');
     expect(shortTitle(gh, 5)).toBe('bar-.');
+  });
+});
+
+describe('isTypingTarget (the browser keys must not eat typing)', () => {
+  const el = (typing: boolean) => ({ closest: (sel: string) => (typing && sel.includes('input') ? {} : null) }) as unknown as EventTarget;
+  it('is true inside a field and false elsewhere', () => {
+    expect(isTypingTarget(el(true))).toBe(true);
+    expect(isTypingTarget(el(false))).toBe(false);
+    expect(isTypingTarget(null)).toBe(false);
+    expect(isTypingTarget({} as EventTarget)).toBe(false);
   });
 });

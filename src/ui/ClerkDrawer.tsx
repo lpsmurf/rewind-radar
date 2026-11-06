@@ -2,14 +2,16 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import type { Assessment, ClerkReply, RepoSummary, Tape } from '../types';
 import AssessmentCard from './AssessmentCard';
 import { gateState, type Member } from '../lib/clerkGate';
-import { answerItems, type ClerkAnswer, type RepoHit } from '../lib/radar';
+import { answerItems, scanTarget, type ClerkAnswer, type RepoHit } from '../lib/radar';
 import type { ScanResult } from '../lib/useStore';
 import { formatStars } from '../lib/stars';
 import type { BrowseItem } from './releasesNav';
+import { autoAskAction } from './autoAsk';
 
 interface Msg { who: 'you' | 'clerk'; text: string; reply?: ClerkReply; github?: RepoHit[]; slugs?: string[] }
 
-export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github, onForget, tapes, onShelve, member, canSignIn, onConnect, onSignIn, onSignOut, autoAsk, hasRadar, onViewRadar, onRadar, onBrowse }: {
+export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github, onForget, tapes, onShelve, member, canSignIn, onConnect, onSignIn, onSignOut, autoAsk, hasRadar, onViewRadar, onRadar, onBrowse, onAutoAskDone }: {
+  onAutoAskDone(): void;
   /** A question to send as soon as the drawer sees it (the browser's ASSESS IT); `n` makes a repeat count as new. */
   autoAsk?: { q: string; n: number } | null; hasRadar: boolean; onViewRadar(): void; onRadar(r: NonNullable<ScanResult['radar']>): void;
   /** Open the releases browser on items, starting at `index`. */
@@ -38,12 +40,16 @@ export default function ClerkDrawer({ onClose, ask, scan, chips, onOpen, github,
   const go = (e: React.FormEvent) => { e.preventDefault(); void send(q.trim()); };
   const lastAuto = useRef(0);
   useEffect(() => {
-    if (autoAsk && autoAsk.n !== lastAuto.current) { lastAuto.current = autoAsk.n; void send(autoAsk.q); }
-  }, [autoAsk]);
+    // Consume the handed-over question once; wait (and keep it) while the clerk is busy.
+    if (autoAskAction(autoAsk, lastAuto.current, busy) !== 'send' || !autoAsk) return;
+    lastAuto.current = autoAsk.n;
+    onAutoAskDone();
+    void send(autoAsk.q);
+  }, [autoAsk, busy]);
 
   async function goScan(e: React.FormEvent) {
     e.preventDefault();
-    const text = gh.trim();
+    const text = scanTarget(gh, github ?? member?.login ?? null);
     if (!text || busy) return;
     setBusy(true);
     setLog((l) => [...l, { who: 'you', text: `Scan my GitHub: ${text}` }]);

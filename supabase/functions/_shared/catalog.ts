@@ -1,5 +1,5 @@
 import { admin } from './admin.ts';
-import type { RepoHit } from './github.ts';
+import type { ProfileFacets, RepoHit } from './github.ts';
 
 export interface CatalogRow { slug: string; title: string; genre: string; blurb: string; kind: string; match?: boolean }
 
@@ -28,3 +28,7 @@ export async function inStore(hits: RepoHit[]): Promise<Set<string>> {
     return new Set();
   }
 }
+
+/** Store slugs (gh- and c-) of the visitor's own repos: a radar never recommends what they already made. */
+export const ownSlugs = (f: ProfileFacets): Set<string> => new Set(f.repos.flatMap((r) => tapeSlugs(`${f.owner}/${r.name}`)));
+export const dropOwn = <T extends { slug: string }>(rows: T[], own: Set<string>): T[] => rows.filter((r) => !own.has(r.slug.toLowerCase()));
