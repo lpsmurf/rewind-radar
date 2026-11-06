@@ -10,9 +10,13 @@ import { parseRepoRef } from '../github.ts';
  * with one new video is 2 units (3 the first time); a 3-hourly schedule is about 8 to 24 units a day.
  */
 const API = 'https://www.googleapis.com/youtube/v3';
-const WINDOW_MS = 14 * 86_400_000;
+const DAY_MS = 86_400_000;
+const DEFAULT_DAYS = 14;
+const MAX_DAYS = 180;
+const PAGE_MAX = 4; // playlist pages read per channel in a backfill (50 videos each)
+const VIDEOS_PER_RUN = 10;
 const FRESH_MS = 48 * 3_600_000;
-const SEEN_MAX = 300;
+const SEEN_MAX = 1000; // a 4 month backfill of a busy channel must not forget ids and start over
 const RUN_CAP = 25; // repos stocked per run
 const MAX_CHANNELS = 10;
 
@@ -52,6 +56,8 @@ export interface WatchSummary {
   cost_usd: number;
   skipped?: string;
   messages?: string[];
+  /** In-window videos not yet processed after this run (0 = done). */
+  remaining: number;
 }
 
 class YouTubeError extends Error {
@@ -113,8 +119,10 @@ const asConfig = (v: unknown): WatchConfig => {
   return { channels, seen: (Array.isArray(o.seen) ? o.seen : []).filter((s): s is string => typeof s === 'string') };
 };
 
-export async function watchChannels(ctx: WatchCtx): Promise<WatchSummary> {
-  const sum: WatchSummary = { channels: 0, videos_checked: 0, repos_found: 0, added: 0, restored: 0, duplicates: 0, errors: 0, not_found: 0, cost_usd: 0 };
+export async function watchChannels(ctx: WatchCtx, opts: { days?: number } = {}): Promise<WatchSummary> {
+  const days = typeof opts.days === 'number' && Number.isFinite(opts.days) ? Math.min(MAX_DAYS, Math.max(1, Math.floor(opts.days))) : DEFAULT_DAYS;
+  const windowMs = days * DAY_MS;
+  const sum: WatchSummary = { channels: 0, videos_checked: 0, repos_found: 0, added: 0, restored: 0, duplicates: 0, errors: 0, not_found: 0, cost_usd: 0, remaining: 0 };
   const key = env('YOUTUBE_API_KEY');
   if (!key) return { ...sum, skipped: 'YOUTUBE_API_KEY is not set' };
   const cfg = asConfig(await ctx.config('watch'));
@@ -124,6 +132,8 @@ export async function watchChannels(ctx: WatchCtx): Promise<WatchSummary> {
   const messages: string[] = [];
   const done: string[] = [];
   let stocked = 0;
+  let checked = 0;
+  let pending = 0; // in-window videos left unprocessed
   let halted = false; // budget spent or cap reached: no more videos this run
   try {
     for (const ch of cfg.channels) {
@@ -137,19 +147,42 @@ export async function watchChannels(ctx: WatchCtx): Promise<WatchSummary> {
           ch.channel_id = item.id;
           ch.uploads = uploads;
         }
-        const list = await api('playlistItems', { part: 'contentDetails,snippet', playlistId: ch.uploads!, maxResults: '5', key });
-        for (const it of list.items ?? []) {
-          if (halted) break;
-          const id = it?.contentDetails?.videoId ?? it?.snippet?.resourceId?.videoId;
-          const published = Date.parse(it?.contentDetails?.videoPublishedAt ?? it?.snippet?.publishedAt ?? '');
-          if (typeof id !== 'string' || !Number.isFinite(published)) continue;
+        // A backfill pages through the uploads (newest first) until the window ends; the usual run reads the latest 5.
+        const found: any[] = [];
+        let pageToken: string | undefined;
+        for (let page = 0; page < (days > DEFAULT_DAYS ? PAGE_MAX : 1); page++) {
+          const list = await api('playlistItems', {
+            part: 'contentDetails,snippet',
+            playlistId: ch.uploads!,
+            maxResults: days > DEFAULT_DAYS ? '50' : '5',
+            ...(pageToken ? { pageToken } : {}),
+            key,
+          });
+          let reachedEnd = false;
+          for (const it of list.items ?? []) {
+            const id = it?.contentDetails?.videoId ?? it?.snippet?.resourceId?.videoId;
+            const published = Date.parse(it?.contentDetails?.videoPublishedAt ?? it?.snippet?.publishedAt ?? '');
+            if (typeof id !== 'string' || !Number.isFinite(published)) continue;
+            if (ctx.now.getTime() - published > windowMs) reachedEnd = true;
+            else if (!cfg.seen.includes(id) && !done.includes(id) && !found.some((f) => f.id === id)) found.push({ it, id, published });
+          }
+          pageToken = typeof list.nextPageToken === 'string' ? list.nextPageToken : undefined;
+          if (reachedEnd || !pageToken) break;
+        }
+        found.sort((x, y) => x.published - y.published); // oldest first: a backfill advances chronologically
+        for (const { it, id, published } of found) {
+          if (halted || checked >= VIDEOS_PER_RUN) {
+            pending++;
+            continue;
+          }
           const age = ctx.now.getTime() - published;
-          if (age > WINDOW_MS || cfg.seen.includes(id) || done.includes(id)) continue;
           if (!(await ctx.budget())) {
             halted = true;
             sum.skipped = 'AI budget spent, will retry';
-            break;
+            pending++;
+            continue;
           }
+          checked++;
           sum.videos_checked++;
           const title = String(it.snippet?.title ?? '');
           const channelTitle = String(it.snippet?.videoOwnerChannelTitle ?? it.snippet?.channelTitle ?? ch.handle);
@@ -181,6 +214,7 @@ export async function watchChannels(ctx: WatchCtx): Promise<WatchSummary> {
           }
           // Creators often pin the list hours after uploading: a fresh video with no owner link yet is retried next run.
           if (complete && (comments.length > 0 || age > FRESH_MS)) done.push(id);
+          else pending++;
         }
       } catch (e) {
         sum.errors++;
@@ -203,6 +237,7 @@ export async function watchChannels(ctx: WatchCtx): Promise<WatchSummary> {
       sum.errors++;
     }
   }
+  sum.remaining = pending;
   if (messages.length) sum.messages = messages;
   try {
     await ctx.logRun({ found: sum.repos_found, queued: sum.added + sum.restored, cost_usd: sum.cost_usd, error: messages.length ? messages.join('; ').slice(0, 500) : undefined });
