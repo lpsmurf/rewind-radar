@@ -1,5 +1,5 @@
 // Pure helpers for Realtime presence. Everything in presence is untrusted input from other browsers.
-import type { Visitor } from '../types';
+import type { Room, Visitor } from '../types';
 import { H, W } from './movement';
 import { capName, safeColor, type Pt } from './remote';
 
@@ -23,11 +23,13 @@ export function visitorsFromPresence(
       const x = l?.x ?? (typeof px === 'number' && Number.isFinite(px) ? clamp(px, W) : undefined);
       const y = l?.y ?? (typeof py === 'number' && Number.isFinite(py) ? clamp(py, H) : undefined);
       const inArcade = m?.room === 'arcade' || m?.aisle === 'arcade';
+      const room: Room = inArcade ? 'arcade' : m?.room === 'repos' ? 'repos' : 'store';
       return {
         id: k,
         name: capName(m?.name) ?? 'GUEST',
         color: safeColor(m?.color, '#fff6d5'),
         aisle: inArcade ? 'arcade' : (m?.aisle ?? 'entrance'),
+        room,
         ...(x !== undefined && y !== undefined ? { x, y } : {}),
       } as Visitor;
     });
@@ -36,7 +38,7 @@ export function visitorsFromPresence(
 /** Wait before reconnect attempt n (0-based): 1 s, 2 s, 4 s ... capped at 30 s. */
 export const backoffMs = (attempt: number): number => Math.min(30_000, 1000 * 2 ** Math.max(0, attempt));
 
-export interface PresencePayload { name: string; color: string; room: 'store' | 'arcade'; x?: number; y?: number }
+export interface PresencePayload { name: string; color: string; room: Room; x?: number; y?: number }
 
 /** The server closes a channel that tracks more than about 5 times in 30 s, so only presence-worthy changes go out. */
 const sigOf = (p: PresencePayload) => `${p.room}|${p.name}|${p.color}`;

@@ -40,7 +40,7 @@ describe('createTrackGate', () => {
   let t = 0;
   const sent: any[] = [];
   const mk = () => createTrackGate((p) => sent.push(p), { minMs: 8000, now: () => t });
-  const p = (room: 'store' | 'arcade', extra = {}): PresencePayload => ({ name: 'N', color: '#fff', room, ...extra });
+  const p = (room: 'store' | 'repos' | 'arcade', extra = {}): PresencePayload => ({ name: 'N', color: '#fff', room, ...extra });
   beforeEach(() => { vi.useFakeTimers(); t = 0; sent.length = 0; });
   afterEach(() => vi.useRealTimers());
   const wait = (ms: number) => { t += ms; vi.advanceTimersByTime(ms); };
@@ -136,5 +136,34 @@ describe('handleChannelStatus', () => {
     const { calls, deps } = make();
     handleChannelStatus('SUBSCRIBED', 'ch', deps);
     expect(calls).toMatchObject({ up: 1, removed: 0, retries: [] });
+  });
+});
+
+describe('repos room presence', () => {
+  it('reads room repos and exposes the room; old clients (store / aisle arcade) still map', () => {
+    const v = visitorsFromPresence({
+      'a~1': [{ room: 'repos', aisle: 'Design' }],
+      'b~1': [{ room: 'store' }],
+      'c~1': [{ aisle: 'arcade' }],
+      'd~1': [{}],
+      'e~1': [{ room: 'bogus' }],
+    }, 'me~1');
+    const by = (id: string) => v.find((o) => o.id === id)!;
+    expect(by('a~1').room).toBe('repos');
+    expect(by('a~1').aisle).toBe('Design');
+    expect(by('b~1').room).toBe('store');
+    expect(by('c~1').room).toBe('arcade');
+    expect(by('d~1').room).toBe('store');
+    expect(by('e~1').room).toBe('store');
+  });
+  it('a change into the repos room goes out at once', () => {
+    const sent: PresencePayload[] = [];
+    let t = 0;
+    const g = createTrackGate((x) => sent.push(x), { now: () => t, setTimer: () => 1, clearTimer: () => {} });
+    const p = (room: PresencePayload['room']): PresencePayload => ({ name: 'N', color: '#fff', room });
+    g.update(p('store'));
+    t = 100;
+    g.update(p('repos'));
+    expect(sent.map((s) => s.room)).toEqual(['store', 'repos']);
   });
 });

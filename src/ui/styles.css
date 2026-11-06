@@ -63,18 +63,6 @@ fieldset{border:0;padding:0;margin:0}
 .small.dim { opacity: 0.7; }
 textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; resize: vertical; }
 
-/* Scan-to-join QR */
-.qr { line-height: 0; border: 4px solid #ffd200; box-shadow: 4px 4px 0 #061846; background: #fff6d5; }
-.qr svg { width: 100%; height: 100%; display: block; image-rendering: pixelated; shape-rendering: crispEdges; }
-.join { text-align: center; }
-.join .qrbtn { background: none; border: 0; padding: 0; margin: 4px auto 8px; display: inline-block; cursor: zoom-in; }
-.join .small { word-break: break-all; }
-.bigqr { z-index: 60; }
-.bigqr .panel { width: auto; max-width: 96vw; max-height: 96vh; overflow: visible; text-align: center; display: grid; justify-items: center; gap: 14px; padding: 28px 24px 22px; box-sizing: border-box; }
-.bigqr h2 { line-height: 1.5; padding: 0 28px; font-size: clamp(11px, 2.2vw, 22px); color: #ffd200; margin: 0; letter-spacing: 1px; }
-.bigqr .url { font-size: clamp(10px, 1.8vw, 16px); margin: 0; word-break: break-all; color: #fff6d5; }
-.bigqr .count { font-size: clamp(10px, 1.6vw, 14px); margin: 0; color: #3ddc84; }
-
 /* Clerk repo assessment card (inside the drawer log) */
 .ghnote { margin: 0 0 8px; }
 .gate { border: 2px dashed #1f4fbf; padding: 8px; display: grid; gap: 8px; }
@@ -134,3 +122,27 @@ textarea { font: inherit; font-size: 9px; width: 100%; box-sizing: border-box; r
 .admin-table th { text-align: left; color: #ffd200; padding: 4px 6px; border-bottom: 3px solid #ffd200; }
 .admin-table td { padding: 4px 6px; border-bottom: 1px solid #1f4fbf; word-break: break-word; }
 .admin-table tr.tot td { color: #3ddc84; }
+
+/* releases browser */
+.browser{padding:8px}
+.browser-inner{position:relative;width:min(1100px,100%);max-height:96vh;overflow:auto;background:#0b2a6f;border:4px solid #ffd200;padding:14px;color:#fff6d5}
+.browser-title{margin:0 28px 10px 0;font-size:10px;color:#ffd200}
+.browser-row{display:flex;align-items:center;justify-content:center;gap:8px}
+.browser .arrow{flex:none;padding:14px 10px}
+.spines{display:flex;gap:6px;align-items:flex-end;flex:none}
+.vhs-spine{width:44px;height:190px;border:3px solid #0a0a14;color:#0a0a14;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:space-between;padding:6px 0;font-family:inherit;font-size:7px}
+.vhs-spine:hover{outline:3px solid #fff6d5}
+.vhs-spine .sp-title{writing-mode:vertical-rl;max-height:130px;overflow:hidden;font-size:8px;background:#fff6d5;padding:4px 2px}
+.vhs-spine .sp-stars{writing-mode:vertical-rl;background:#0a0a14;color:#ffd200;padding:3px 1px}
+.vhs-cover{flex:1 1 320px;min-width:0;max-width:440px;background:#ffd200;color:#0a0a14;border:6px solid #0a0a14;box-shadow:6px 6px 0 #061846;padding:16px;min-height:320px;display:flex;flex-direction:column;gap:8px}
+.vhs-cover .vhs-top{display:flex;justify-content:space-between;align-items:center}
+.vhs-cover .sticker{position:static;transform:rotate(-6deg)}
+.vhs-cover h2{margin:6px 0 0;font-size:15px;line-height:1.5;word-break:break-word}
+.vhs-cover .blurb{flex:1}
+@media (max-width:860px){.vhs-spine.far{display:none}.vhs-spine{width:36px}}
+@media (max-width:560px){.spines{display:none}}
+.vhs-cover .why{font-size:8px;line-height:1.6;margin:0;background:#0b2a6f;color:#fff6d5;padding:6px;border:3px solid #0a0a14}
+.ghchips{display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 6px}
+.vhs-chip{font:inherit;font-size:7px;background:#fff6d5;color:#0a0a14;border:2px solid #0a0a14;border-left:8px solid #ffd200;padding:4px 6px;cursor:pointer;display:flex;gap:6px;align-items:center;max-width:100%}
+.vhs-chip b{color:#0b2a6f}
+.vhs-chip:hover{background:#ffd200}

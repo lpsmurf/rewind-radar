@@ -1,9 +1,10 @@
-// Pure movement logic for the store and arcade rooms. No React, no DOM: the canvas and the tests both import this.
+// Pure movement logic for the skills, repos and arcade rooms (skills and repos share one layout). No React, no DOM: the canvas and the tests both import this.
 // Coordinates are canvas pixels (W x H). A character's position is where its feet are.
 
 export interface Point { x: number; y: number }
 export interface Rect { x: number; y: number; w: number; h: number }
-export type Room = 'store' | 'arcade';
+import type { Room } from '../types';
+export type { Room };
 
 export const W = 480;
 export const H = 270;
@@ -26,6 +27,9 @@ export const SHELVES: Rect[] = [
 /** Doorway to the arcade, on the right of the store floor. */
 export const DOOR: Rect = { x: 404, y: 226, w: 66, h: 40 };
 
+/** Door to the other store room (REPOS from skills, SKILLS from repos): same spot in both, left of the arcade door. */
+export const REPOS_DOOR: Rect = { x: 330, y: 226, w: 66, h: 40 };
+
 /** Arcade room: five cabinets against the back wall, and the way back to the store. */
 export const CABINET_W = 60;
 export const CABINET_TOP = 56;
@@ -36,7 +40,26 @@ export const ARCADE_EXIT: Rect = { x: 10, y: 228, w: 60, h: 38 };
 export const STORE_SPAWN_FROM_ARCADE: Point = { x: DOOR.x + DOOR.w / 2, y: DOOR.y + DOOR.h - 2 };
 export const ARCADE_SPAWN: Point = { x: ARCADE_EXIT.x + ARCADE_EXIT.w / 2, y: ARCADE_EXIT.y + ARCADE_EXIT.h - 2 };
 
-const obstaclesOf = (room: Room): Rect[] => (room === 'arcade' ? ARCADE_CABINETS : SHELVES);
+/** Both store rooms use the same shelves, counter and doors; the arcade has its cabinets. */
+export const obstaclesIn = (room: Room): Rect[] => (room === 'arcade' ? ARCADE_CABINETS : SHELVES);
+const obstaclesOf = obstaclesIn;
+
+export interface RoomDoor { rect: Rect; to: Room }
+export function doorsIn(room: Room): RoomDoor[] {
+  if (room === 'arcade') return [{ rect: ARCADE_EXIT, to: 'store' }];
+  if (room === 'repos') return [{ rect: REPOS_DOOR, to: 'store' }];
+  return [{ rect: DOOR, to: 'arcade' }, { rect: REPOS_DOOR, to: 'repos' }];
+}
+/** The room a door under this point leads to, or null. */
+export const doorAt = (room: Room, p: Point): Room | null => doorsIn(room).find((d) => inRect(p, d.rect))?.to ?? null;
+
+const feet = (r: Rect): Point => ({ x: r.x + r.w / 2, y: r.y + r.h - 2 });
+/** Where you appear in room `to` after walking through the door from room `from`. */
+export function spawnFor(to: Room, from: Room): Point {
+  if (to === 'arcade') return ARCADE_SPAWN;
+  if (from === 'arcade') return STORE_SPAWN_FROM_ARCADE;
+  return feet(REPOS_DOOR);
+}
 
 const strictlyInside = (p: Point, r: Rect) => p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h;
 

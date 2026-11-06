@@ -18,6 +18,9 @@ export type Genre = (typeof GENRES)[number];
 /** Aisle ids: a genre name, or one of the special areas. */
 export type Aisle = Genre | 'new' | 'community' | 'counter' | 'entrance' | 'arcade';
 
+/** The rooms of the store. 'store' is the SKILLS room (the name stays for old clients' presence). */
+export type Room = 'store' | 'repos' | 'arcade';
+
 export interface Tape {
   id: string;
   kind: TapeKind;
@@ -45,6 +48,8 @@ export interface Visitor {
   name: string; // e.g. "GUEST-4F2A"
   color: string; // css color
   aisle: Aisle;
+  /** Which room they are in (absent on old data: the skills room). */
+  room?: Room;
   /** Last known position on the canvas (remote visitors only). Mutated in place by move broadcasts. */
   x?: number;
   y?: number;
@@ -172,4 +177,13 @@ export interface ClerkReply {
   reviewed_at?: string;
   cached?: boolean;
   stale?: boolean;
+}
+
+/** Skills (and memory) live in the SKILLS room; repos and community tapes in the REPOS room. */
+export const roomOfKind = (kind: TapeKind): Room => (kind === 'repo' || kind === 'community' ? 'repos' : 'store');
+export const roomOfTape = (t: Pick<Tape, 'kind'>): Room => roomOfKind(t.kind);
+
+/** Room and aisle of a tape. Old repo tapes keep their genre aisle id; it is the genre stand of the REPOS room. */
+export function placeOf(t: Pick<Tape, 'kind' | 'genre'> & { week?: string | null }, newWeek?: string | null): { room: Room; aisle: Aisle } {
+  return { room: roomOfTape(t), aisle: aisleOf(t, newWeek) };
 }
