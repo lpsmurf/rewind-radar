@@ -71,7 +71,7 @@ function youtubeChannels(v: unknown): string[] | string {
 
 /**
  * The watcher's list: the admin sends any channel form (see parseChannelInput); each is stored as `{ handle }` or `{ channel_id }`.
- * Whatever the watcher learned (resolved ids, uploads playlist, seen videos) is kept from `current` for entries that stay,
+ * Whatever the watcher learned (resolved ids, uploads playlist, seen videos, backfill state) is kept from `current` for entries that stay,
  * so saving the list never makes it re-resolve or re-stock.
  */
 function parseWatch(o: Record<string, unknown>, current: unknown): { value: Record<string, unknown> } | { error: string } {
@@ -91,9 +91,14 @@ function parseWatch(o: Record<string, unknown>, current: unknown): { value: Reco
     if (have.has(k)) continue;
     have.add(k);
     const prev = old.find((c) => keyOf(c) === k);
+    // The backfill state belongs to the watcher: an unchanged entry keeps it, a new one starts without (and so backfills on its own).
+    const state = {
+      ...(prev && typeof prev.backfilled_at === 'string' ? { backfilled_at: prev.backfilled_at } : {}),
+      ...(prev && typeof prev.backfill_left === 'number' ? { backfill_left: prev.backfill_left } : {}),
+    };
     if (prev && typeof prev.uploads === 'string' && (typeof prev.channel_id === 'string')) {
-      channels.push({ ...entry, channel_id: prev.channel_id, uploads: prev.uploads });
-    } else channels.push(entry);
+      channels.push({ ...entry, channel_id: prev.channel_id, uploads: prev.uploads, ...state });
+    } else channels.push({ ...entry, ...state });
   }
   const seen = (Array.isArray(cur.seen) ? cur.seen : []).filter((s): s is string => typeof s === 'string').slice(-300);
   return { value: { channels, seen } };
