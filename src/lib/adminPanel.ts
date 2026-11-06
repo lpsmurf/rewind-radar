@@ -121,6 +121,12 @@ export function handlesOf(text: string): string[] {
   return out;
 }
 
+/** One watched channel's backfill state for the Config tab. A channel without backfilled_at is still reading its first 120 days. */
+export function channelState(c: { handle?: string; channel_id?: string; backfilled_at?: string; backfill_left?: number }): string {
+  if (c.backfilled_at) return `up to date since ${c.backfilled_at.slice(0, 10)}`;
+  return typeof c.backfill_left === 'number' ? `backfilling (${c.backfill_left} video${c.backfill_left === 1 ? '' : 's'} left)` : 'backfilling';
+}
+
 /** The watcher's answer in one line for the panel. */
 export function watchSummaryLine(r: { skipped?: string; channels: number; videos_checked: number; repos_found: number; added: number; restored: number; duplicates: number; errors: number }): string {
   if (r.skipped) return `Skipped: ${r.skipped}`;

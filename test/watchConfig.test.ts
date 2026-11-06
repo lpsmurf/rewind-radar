@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isConfigKey, parseSourceConfig } from '../lib/sources/config.ts';
-import { handlesOf, isHandle, watchSummaryLine } from '../src/lib/adminPanel.ts';
+import { channelState, handlesOf, isHandle, watchSummaryLine } from '../src/lib/adminPanel.ts';
 
 const CUR = {
   channels: [{ handle: '@TheNextNewThingAI', channel_id: 'UC' + 'a'.repeat(22), uploads: 'UU' + 'a'.repeat(22) }, { handle: '@Other' }],
@@ -70,5 +70,46 @@ describe('watch panel helpers', () => {
     expect(watchSummaryLine(r)).toBe('1 channel · 2 new videos · 9 repos found · added 3 · restored 1 · already in store 5');
     expect(watchSummaryLine({ ...r, errors: 2 })).toMatch(/ · 2 errors$/);
     expect(watchSummaryLine({ ...r, skipped: 'YOUTUBE_API_KEY is not set' })).toBe('Skipped: YOUTUBE_API_KEY is not set');
+  });
+});
+
+describe('parseSourceConfig watch keeps the backfill state', () => {
+  const UC = 'UC' + 'b'.repeat(22);
+  const AT = '2026-11-01T08:00:00.000Z';
+  const cur = {
+    channels: [
+      { handle: '@Done', channel_id: 'UC' + 'a'.repeat(22), uploads: 'UU' + 'a'.repeat(22), backfilled_at: AT },
+      { handle: '@Busy', backfill_left: 7 },
+      { channel_id: UC, backfilled_at: AT },
+    ],
+    seen: [],
+  };
+  it('keeps backfilled_at and backfill_left of unchanged entries, resolved or not, whatever the client sends', () => {
+    const r = parse({ channels: [{ handle: '@done', backfilled_at: 'hack' }, '@Busy', UC] }, cur);
+    expect(r.value.channels).toEqual([
+      { handle: '@done', channel_id: 'UC' + 'a'.repeat(22), uploads: 'UU' + 'a'.repeat(22), backfilled_at: AT },
+      { handle: '@Busy', backfill_left: 7 },
+      { channel_id: UC, backfilled_at: AT },
+    ]);
+  });
+  it('a newly added channel starts without backfilled_at, so it backfills on its own', () => {
+    const r = parse({ channels: ['@Done', { handle: '@Brand_New', backfilled_at: AT }] }, cur);
+    expect(r.value.channels[1]).toEqual({ handle: '@Brand_New' });
+  });
+  it('a removed channel is gone, and adding it back later starts a fresh backfill', () => {
+    const gone = parse({ channels: ['@Done'] }, cur);
+    expect(gone.value.channels).toHaveLength(1);
+    expect(parse({ channels: ['@Done', '@Busy'] }, gone.value).value.channels[1]).toEqual({ handle: '@Busy' });
+  });
+});
+
+describe('channelState', () => {
+  it('says backfilling, with the videos left when known', () => {
+    expect(channelState({ handle: '@a' })).toBe('backfilling');
+    expect(channelState({ handle: '@a', backfill_left: 7 })).toBe('backfilling (7 videos left)');
+    expect(channelState({ handle: '@a', backfill_left: 1 })).toBe('backfilling (1 video left)');
+  });
+  it('says up to date since the date once backfilled', () => {
+    expect(channelState({ handle: '@a', backfilled_at: '2026-11-01T08:00:00.000Z' })).toBe('up to date since 2026-11-01');
   });
 });

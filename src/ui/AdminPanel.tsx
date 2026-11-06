@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { API } from '../lib/api';
-import { adminHeaders, formatUsd, channelEntries, CHANNEL_INPUT_HINT, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, watchSummaryLine, backfillLine, runBackfill, type SpendRow, type WatchRunResult } from '../lib/adminPanel';
+import { adminHeaders, formatUsd, channelEntries, CHANNEL_INPUT_HINT, failedLines, linesOf, pastedUrls, safeHref, shortDate, spendTable, stockLines, stockStatusLabel, stockSummary, watchSummaryLine, channelState, backfillLine, runBackfill, type SpendRow, type WatchRunResult } from '../lib/adminPanel';
 
 const KEY = 'rr-admin-token'; // sessionStorage only: gone when the tab closes
 type Tab = 'queue' | 'add' | 'spend' | 'runs' | 'config';
@@ -251,7 +251,7 @@ function Config({ token, fail }: TabProps) {
   const [web, loadWeb] = useLoad<{ value: { query?: string } | null }>(token, 'admin/config/web', fail);
   const [queries, setQueries] = useState('');
   const [channels, setChannels] = useState('');
-  const [watch, loadWatch] = useLoad<{ value: { channels?: { handle?: string; channel_id?: string }[] } | null }>(token, 'admin/config/watch', fail);
+  const [watch, loadWatch] = useLoad<{ value: { channels?: { handle?: string; channel_id?: string; backfilled_at?: string; backfill_left?: number }[] } | null }>(token, 'admin/config/watch', fail);
   const [query, setQuery] = useState('');
   const [handles, setHandles] = useState('');
   const [msg, setMsg] = useState('');
@@ -335,6 +335,11 @@ function Config({ token, fail }: TabProps) {
       <h3>WATCHED CHANNELS</h3>
       <label>CHANNELS (one per line, max 10: channel link, @handle or channel ID). New uploads are checked every 3 hours: repos the channel lists in its own comments go on the shelves.<textarea rows={3} placeholder="channel link, @handle or channel ID" value={handles} onChange={(e) => setHandles(e.target.value)} /></label>
       {badHandles.length > 0 && <p className="err">{CHANNEL_INPUT_HINT}: {badHandles.join(', ')}</p>}
+      {(watch.value?.channels ?? []).length > 0 && (
+        <ul className="small">
+          {(watch.value?.channels ?? []).map((c) => <li key={c.handle ?? c.channel_id}>{c.handle ?? c.channel_id}: {channelState(c)}</li>)}
+        </ul>
+      )}
       <div className="row">
         <button className="btn" disabled={hs.length > 10 || badHandles.length > 0} onClick={() => save('watch', { channels: hs }, loadWatch)}>SAVE CHANNELS</button>
         <button className="btn alt" disabled={running} onClick={runWatcher}>{running ? 'RUNNING...' : 'RUN WATCHER NOW'}</button>
