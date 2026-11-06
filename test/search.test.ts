@@ -9,7 +9,7 @@ afterEach(() => vi.useRealTimers());
 describe('search query building', () => {
   it('keeps at most 5 plain keywords and drops operators, quotes and qualifiers', () => {
     expect(searchTerms('"a skill for making diagrams" user:evil OR -foo AND stars:>1 NOT bar baz qux quux corge')).toEqual([
-      'making', 'diagrams', 'foo', 'bar', 'baz',
+      'diagrams', 'foo', 'bar', 'baz', 'qux', // "making" is filler now (see the relaxation tests below)
     ]);
   });
 
@@ -143,5 +143,38 @@ describe('profileQueries', () => {
     expect(profileQueries({ owner: 'o', repos: [r('Go', ['mcp']), r('Rust')] })).toEqual([{ text: 'mcp', language: 'Go' }, { text: 'mcp', language: 'Rust' }]);
     expect(profileQueries({ owner: 'o', repos: [r('Go')] })).toEqual([{ text: '', language: 'Go' }]);
     expect(profileQueries({ owner: 'o', repos: [] })).toEqual([]);
+  });
+});
+
+describe('search relaxation (GitHub ANDs every keyword)', () => {
+  it('drops filler words that are almost never in a repo description', () => {
+    expect(searchTerms('a rust library for building terminal user interfaces')).toEqual(['rust', 'terminal', 'user', 'interfaces']);
+    expect(searchTerms('best framework to make a simple app using python')).toEqual(['python']);
+  });
+
+  it('retries once with the first two keywords when the full query finds nothing', async () => {
+    const urls: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      urls.push(url);
+      const terms = qOf(url).split(' ').filter((t) => !t.includes(':'));
+      const items = terms.length <= 2 ? [searchItem('ratatui/ratatui')] : [];
+      return new Response(JSON.stringify({ total_count: items.length, items }), { status: 200 });
+    });
+    const hits = await searchRepos('rust terminal user interfaces widgets', { limit: 8 });
+    expect(urls).toHaveLength(2);
+    expect(qOf(urls[1]).startsWith('rust terminal ')).toBe(true);
+    expect(hits.map((h) => h.full_name)).toEqual(['ratatui/ratatui']);
+    // the relaxed result is cached under the original query
+    await searchRepos('rust terminal user interfaces widgets', { limit: 8 });
+    expect(urls).toHaveLength(2);
+  });
+
+  it('does not retry when the query already has two keywords or fewer, or when results came back', async () => {
+    const urls = stubSearch([]);
+    await searchRepos('rust tui', { limit: 8 });
+    expect(urls).toHaveLength(1);
+    const urls2 = stubSearch([searchItem('a/b')]);
+    await searchRepos('mcp server registry client', { limit: 8 });
+    expect(urls2).toHaveLength(1);
   });
 });
