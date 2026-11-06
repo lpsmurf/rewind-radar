@@ -6,6 +6,38 @@ export const isConfigKey = (k: string): k is ConfigKey => (CONFIG_KEYS as readon
 const CHANNEL = /^UC[\w-]{22}$/;
 const HANDLE = /^@[A-Za-z0-9._-]{3,30}$/;
 const MAX_WATCH = 10;
+const BARE_HANDLE = /^[A-Za-z0-9._-]{3,30}$/;
+const YT_URL = /^(?:https?:\/\/)?(?:www\.|m\.)?youtube\.com\/([^?#]*)(?:[?#].*)?$/i;
+
+/** Message for the admin when a channel input is not understood. */
+export const CHANNEL_INPUT_HINT = 'Use a channel link, @handle or channel ID';
+
+/**
+ * Any common way of naming a YouTube channel: @handle, a bare handle (3 to 30 of A-Za-z0-9._-), a channel URL
+ * (youtube.com/@handle[/videos], m.youtube.com, with or without a query) or a UC id (bare or in /channel/UC...).
+ * Video, /c/ and /user/ URLs and anything else give null. The handle keeps its case and always starts with @.
+ */
+export function parseChannelInput(input: string): { handle: string } | { channel_id: string } | null {
+  if (typeof input !== 'string') return null;
+  const s = input.trim();
+  if (CHANNEL.test(s)) return { channel_id: s };
+  if (HANDLE.test(s)) return { handle: s };
+  const m = YT_URL.exec(s);
+  if (m) {
+    const [first, second] = m[1].split('/');
+    let seg = first;
+    try {
+      seg = decodeURIComponent(first);
+    } catch {
+      return null;
+    }
+    if (HANDLE.test(seg)) return { handle: seg };
+    if (seg.toLowerCase() === 'channel' && CHANNEL.test(second ?? '')) return { channel_id: second };
+    return null;
+  }
+  if (BARE_HANDLE.test(s) && !/youtube\.com|youtu\.be/i.test(s)) return { handle: `@${s}` };
+  return null;
+}
 
 function list(v: unknown, max: number, what: string, ok: (s: string) => boolean, rule: string): string[] | string {
   if (!Array.isArray(v)) return `${what} must be a list`;
