@@ -1,5 +1,5 @@
 import { admin } from './admin.ts';
-import { clerk, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
+import { clerk, costUsd, moderateChat, recommendForProfile, reviewProposal, reviewRepo, reviewSubmission, SONNET, type OnUsage } from './ai.ts';
 import { BudgetError, BusyError, budgetLeft, getAssessment, healthSignals, personalFit, PROFILE_RESERVE_USD, RateLimitError, recordUsage, reserve } from './assess.ts';
 import { candidates, dropOwn, inStore, ownSlugs, strongMatch, tapeSlugs, type CatalogRow } from './catalog.ts';
 import { checkMessage, CHAT_LINES } from './chatGuard.ts';
@@ -12,8 +12,9 @@ import { pool, refreshRadar } from './radar.ts';
 import { isConfigKey, parseSourceConfig } from './sources/config.ts';
 import { snapshotStars } from './stars.ts';
 import { SOURCES } from './sources/index.ts';
-import { liveCtx, manualSource, runSources } from './sources/pipeline.ts';
+import { dbConfig, liveCtx, manualSource, runSources } from './sources/pipeline.ts';
 import { stockedTape } from './sources/stock.ts';
+import { watchChannels, type StockResult, type WatchCtx } from './sources/watch.ts';
 import { env } from './env.ts';
 import { aisleOf } from '../src/types.ts';
 
@@ -230,9 +231,10 @@ function existingTape(full: string, found: Map<string, TapeRef>): { live?: TapeR
 async function stockRepo(
   db: ReturnType<typeof admin>,
   facts: RepoFacts,
-  meta: { credit?: { url?: string; title?: string }; old?: { slug: string; kind: string } } = {},
-): Promise<{ slug: string; conflict: boolean; genre: string }> {
-  const review = await meter('admin', (onUsage) => reviewRepo(facts, onUsage));
+  meta: { credit?: { url?: string; title?: string }; old?: { slug: string; kind: string }; route?: string } = {},
+): Promise<{ slug: string; conflict: boolean; genre: string; cost_usd: number }> {
+  let cost_usd = 0;
+  const review = await meter(meta.route ?? 'admin', (onUsage) => reviewRepo(facts, (m, u) => (cost_usd += costUsd(m, u), onUsage(m, u))));
   const tape = stockedTape(facts, review, meta.credit ?? {});
   if (meta.old) {
     const { error } = await db.from('tapes').upsert({ ...tape, slug: meta.old.slug, kind: meta.old.kind }, { onConflict: 'slug' }).select('id').single();
@@ -240,10 +242,74 @@ async function stockRepo(
   } else {
     const ins = await db.from('tapes').insert(tape).select('id').single();
     if (ins.error && ins.error.code !== '23505') throw ins.error;
-    if (ins.error) return { slug: tape.slug, conflict: true, genre: tape.genre };
+    if (ins.error) return { slug: tape.slug, conflict: true, genre: tape.genre, cost_usd };
   }
   await snapshotStars([{ repo: facts.full_name, stars: facts.stars }]);
-  return { slug: meta.old?.slug ?? tape.slug, conflict: false, genre: tape.genre };
+  return { slug: meta.old?.slug ?? tape.slug, conflict: false, genre: tape.genre, cost_usd };
+}
+
+/** The pending queue row for a repo that just reached the shelves another way. Best-effort. */
+async function clearQueueRow(db: ReturnType<typeof admin>, full: string): Promise<void> {
+  try {
+    await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('repo', full.toLowerCase()).eq('status', 'pending');
+  } catch (e) {
+    console.warn('[stock] could not clear the queue row', e);
+  }
+}
+
+/** The channel watcher's way onto the shelves: the /admin/stock path for one repo, credited to a video. Metered as route 'watch'. */
+async function watchStock(db: ReturnType<typeof admin>, repo: string, credit: { url: string; title: string }): Promise<StockResult> {
+  const ref = parseRepoRef(repo);
+  if (!ref) return { status: 'not_found' };
+  try {
+    const { live, old } = existingTape(ref.full, await tapesBySlug(db, tapeSlugs(ref.full)));
+    if (live) {
+      await clearQueueRow(db, ref.full);
+      return { status: 'duplicate', slug: live.slug };
+    }
+    const facts = await fetchRepoFacts(ref);
+    if (!facts) return { status: 'not_found' };
+    const stocked = await stockRepo(db, facts, { credit, old, route: 'watch' });
+    if (stocked.conflict) return { status: 'duplicate', slug: stocked.slug, cost_usd: stocked.cost_usd };
+    await clearQueueRow(db, ref.full);
+    return { status: old ? 'restored' : 'added', slug: stocked.slug, cost_usd: stocked.cost_usd };
+  } catch (e) {
+    console.error('[watch]', ref.full, e);
+    return { status: 'error' };
+  }
+}
+
+/** The live wiring of the channel watcher: source_config 'watch', the shared stock path, and a source_runs row. */
+function liveWatchCtx(): WatchCtx {
+  const db = admin();
+  return {
+    now: new Date(),
+    config: dbConfig,
+    saveConfig: async (key, value) => {
+      const { error } = await db.from('source_config').upsert({ key, value }, { onConflict: 'key' });
+      if (error) throw error;
+    },
+    budget: budgetLeft,
+    stock: (repo, credit) => watchStock(db, repo, credit),
+    logRun: async (row) => {
+      await db.from('source_runs').insert({ source: 'youtube-watch', ...row, error: row.error ?? null });
+    },
+  };
+}
+
+/** Run the watcher, then batch pre-assess whatever it put on the shelves (best-effort, like /admin/stock). */
+async function runWatch() {
+  const stocked: string[] = [];
+  const ctx = liveWatchCtx();
+  const stock = ctx.stock;
+  ctx.stock = async (repo, credit) => {
+    const r = await stock(repo, credit);
+    if (r.status === 'added' || r.status === 'restored') stocked.push(repo.toLowerCase());
+    return r;
+  };
+  const out = await watchChannels(ctx);
+  if (stocked.length) await submitAssessBatch(stocked).catch((e) => console.warn('[watch] batch hook failed', e));
+  return out;
 }
 
 const TAPE_COLS = 'id,kind,slug,title,genre,blurb,source_url,stars,language,ring,rating,trust,submitter,rentals,created_at';
@@ -579,6 +645,24 @@ export async function handle(req: Request): Promise<Response> {
     }
   }
 
+  // --- channel watcher: pg_cron calls this every 3 hours (same secret rule as sources/run) ---
+  if (path === 'sources/watch' && req.method === 'POST') {
+    const secret = env('CRON_SECRET');
+    if (!secret || !sameSecret(req.headers.get('x-cron-secret') ?? '', secret)) return json({ error: 'Forbidden' }, 403);
+    const job = runWatch();
+    const rt = (globalThis as any).EdgeRuntime;
+    if (rt?.waitUntil) {
+      rt.waitUntil(job.catch((e) => console.error('[watch]', e)));
+      return json({ ok: true, started: true }, 202);
+    }
+    try {
+      return json({ ok: true, ...(await job) });
+    } catch (e) {
+      console.error('[watch]', e);
+      return json({ error: 'Watch run failed' }, 500);
+    }
+  }
+
   // --- monthly shelf: pg_cron calls this on the 1st; it builds last calendar month's picks (database only, no AI) ---
   if (path === 'sources/monthly' && req.method === 'POST') {
     const secret = env('CRON_SECRET');
@@ -719,13 +803,7 @@ export async function handle(req: Request): Promise<Response> {
       });
       try {
         const found = await tapesBySlug(db, todo.flatMap((t) => tapeSlugs(t.ref.full)));
-        const markQueue = async (full: string) => {
-          try {
-            await db.from('ingest_queue').update({ status: 'stocked', decided_at: new Date().toISOString() }).eq('repo', full.toLowerCase()).eq('status', 'pending');
-          } catch (e) {
-            console.warn('[admin:stock] could not clear the queue row', e);
-          }
-        };
+        const markQueue = (full: string) => clearQueueRow(db, full);
         await pool(todo, 3, async ({ i, ref }) => {
           const input = results[i].input;
           try {
@@ -760,6 +838,16 @@ export async function handle(req: Request): Promise<Response> {
         else await job;
       }
       return json({ results, added: added.length, skipped: results.length - added.length });
+    }
+
+    // Run the channel watcher now and wait for its summary: about 3 YouTube calls, then GitHub plus one Haiku review per new repo.
+    if (path === 'admin/watch/run' && req.method === 'POST') {
+      try {
+        return json({ ok: true, ...(await runWatch()) });
+      } catch (e) {
+        console.error('[admin:watch]', e);
+        return json({ error: 'Watch run failed' }, 500);
+      }
     }
 
     if (path === 'admin/spend' && req.method === 'GET') {
